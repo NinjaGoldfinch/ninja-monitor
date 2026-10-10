@@ -14,6 +14,7 @@ Usage: ninja-monitor [--config <path>]
 
 Options:
   --config <path>  Config file (default /etc/ninja-monitor/config.toml)
+  --check          Validate the config, check the paths it names, then exit
   -h, --help       Show this help
   -V, --version    Show the version
 
@@ -23,14 +24,17 @@ Environment:
 
 enum Command {
     Run(PathBuf),
+    Check(PathBuf),
     Help,
     Version,
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut config = PathBuf::from(DEFAULT_CONFIG_PATH);
+    let mut check = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--check" => check = true,
             "-h" | "--help" => return Ok(Command::Help),
             "-V" | "--version" => return Ok(Command::Version),
             "--config" => {
@@ -42,13 +46,18 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Command, String>
             },
         }
     }
-    Ok(Command::Run(config))
+    Ok(if check {
+        Command::Check(config)
+    } else {
+        Command::Run(config)
+    })
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let config_path = match parse_args(std::env::args().skip(1)) {
         Ok(Command::Run(path)) => path,
+        Ok(Command::Check(path)) => return check(&path),
         Ok(Command::Help) => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -71,6 +80,22 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn check(path: &std::path::Path) -> ExitCode {
+    let config = match Config::load(path) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("ninja-monitor: {err:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("config {} is valid", path.display());
+    let secrets = Secrets::from_env(&config);
+    for line in ninja_monitor::check::report(&config, &secrets) {
+        println!("{line}");
+    }
+    ExitCode::SUCCESS
 }
 
 async fn run(config_path: PathBuf) -> anyhow::Result<()> {
@@ -134,6 +159,9 @@ mod tests {
             matches!(parse(&["--config=b.toml"]), Ok(Command::Run(p)) if p == Path::new("b.toml"))
         );
         assert!(matches!(parse(&["--help"]), Ok(Command::Help)));
+        assert!(
+            matches!(parse(&["--check", "--config", "c.toml"]), Ok(Command::Check(p)) if p == Path::new("c.toml"))
+        );
         assert!(matches!(parse(&["-V"]), Ok(Command::Version)));
         assert!(parse(&["--config"]).is_err());
         assert!(parse(&["--bogus"]).is_err());

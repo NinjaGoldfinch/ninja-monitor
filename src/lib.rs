@@ -2,6 +2,7 @@
 
 pub mod alerts;
 pub mod api;
+pub mod check;
 pub mod config;
 pub mod heartbeat;
 pub mod history;
