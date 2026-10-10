@@ -4,6 +4,7 @@
 #   dev/simulate.sh                              # terminal 1
 #   cargo run -- --config dev/config.toml        # terminal 2
 #   curl -s localhost:9090/stats                 # terminal 3
+#   curl -s "localhost:9090/history?scope=service:riot-proxy&minutes=5"
 
 [server]
 bind = "127.0.0.1:9090"
@@ -24,6 +25,7 @@ mounts = ["/"]
 [[service]]
 name = "riot-proxy"
 unit = "riot-proxy.service"
+paths = ["tests/fixtures"]   # any local directory, just to show disk_bytes
 
 [[service]]
 name = "cloudflared"

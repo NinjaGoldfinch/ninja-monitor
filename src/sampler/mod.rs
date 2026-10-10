@@ -4,12 +4,13 @@
 pub mod cgroup;
 pub mod disk;
 pub mod host;
+pub mod walk;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio::time::MissedTickBehavior;
 use tracing::debug;
 
@@ -17,6 +18,7 @@ use crate::config::Config;
 use crate::sample::{HostSample, Sample, ServiceSample, ServiceState};
 use cgroup::{CpuTracker, parse_keyed_u64, parse_single_u64};
 use host::CpuTimes;
+use walk::DiskUsages;
 
 pub struct Sampler {
     host_name: String,
@@ -24,6 +26,7 @@ pub struct Sampler {
     mounts: Vec<PathBuf>,
     prev_host_cpu: Option<CpuTimes>,
     services: Vec<ServiceSlot>,
+    disk_usage: Option<watch::Receiver<DiskUsages>>,
 }
 
 struct ServiceSlot {
@@ -51,16 +54,33 @@ impl Sampler {
             mounts: config.host.mounts.clone(),
             prev_host_cpu: None,
             services,
+            disk_usage: None,
         }
+    }
+
+    /// Per-service disk usage from the slow walker, in config order.
+    pub fn with_disk_usage(mut self, rx: watch::Receiver<DiskUsages>) -> Self {
+        self.disk_usage = Some(rx);
+        self
     }
 
     pub fn sample(&mut self, now: Instant, timestamp: u64) -> Sample {
         let host = self.sample_host();
-        let services = self
+        let mut services: Vec<ServiceSample> = self
             .services
             .iter_mut()
             .map(|slot| sample_service(slot, now))
             .collect();
+        // Disk usage belongs to the paths, so it is reported even when a service is down.
+        if let Some(rx) = &self.disk_usage {
+            let usages = rx.borrow();
+            for (service, usage) in services.iter_mut().zip(usages.iter()) {
+                if let Some(usage) = usage {
+                    service.disk_bytes = Some(usage.bytes);
+                    service.disk_measured_at = Some(usage.measured_at);
+                }
+            }
+        }
         Sample {
             timestamp,
             host,
@@ -288,6 +308,25 @@ mod tests {
         assert_eq!(s.host.mem_total_bytes, None);
         assert_eq!(s.host.uptime_secs, None);
         assert!(s.services.iter().all(|svc| svc.state == ServiceState::Down));
+    }
+
+    #[test]
+    fn carries_latest_disk_usage() {
+        let (tx, rx) = watch::channel(vec![None, None, None]);
+        let mut sampler = Sampler::new(&fixture_config()).with_disk_usage(rx);
+        let s = sampler.sample(Instant::now(), 1);
+        assert!(s.services.iter().all(|svc| svc.disk_bytes.is_none()));
+
+        let usage = walk::DiskUsage {
+            bytes: 4096,
+            measured_at: 77,
+        };
+        tx.send_replace(vec![None, None, Some(usage)]);
+        let s = sampler.sample(Instant::now(), 2);
+        assert_eq!(s.services[0].disk_bytes, None);
+        // "site" is down but its paths can still be measured.
+        assert_eq!(s.services[2].disk_bytes, Some(4096));
+        assert_eq!(s.services[2].disk_measured_at, Some(77));
     }
 
     #[test]

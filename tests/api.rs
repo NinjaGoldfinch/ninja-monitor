@@ -442,3 +442,35 @@ fn history_bad_requests() {
         assert!(body["error"].as_str().is_some(), "{path}: {body}");
     }
 }
+
+#[test]
+fn disk_usage_reported_with_timestamp() {
+    let app = App::start("100ms");
+    let stats = app.wait_for_stats("disk usage", |s| {
+        service(s, "riot-proxy")["disk_bytes"].as_u64().is_some()
+    });
+    let riot = service(&stats, "riot-proxy");
+    let bytes = riot["disk_bytes"].as_u64().unwrap();
+    assert!(bytes >= 300_000, "{bytes}");
+    let measured = riot["disk_measured_at"].as_u64().unwrap();
+    assert!(measured <= stats["timestamp"].as_u64().unwrap() + 1000);
+    // Services without paths never get a figure.
+    assert_eq!(service(&stats, "cloudflared")["disk_bytes"], Value::Null);
+
+    // Growth shows up on a later walk.
+    fs::write(app.path("data/more"), vec![1u8; 1_000_000]).unwrap();
+    app.wait_for_stats("disk usage to grow", |s| {
+        service(s, "riot-proxy")["disk_bytes"]
+            .as_u64()
+            .is_some_and(|b| b >= bytes + 1_000_000)
+    });
+
+    let (_, history) = app.get("/history?scope=service:riot-proxy");
+    assert!(
+        history["disk_bytes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_u64().is_some_and(|b| b >= 300_000))
+    );
+}
