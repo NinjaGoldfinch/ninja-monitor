@@ -1,0 +1,49 @@
+[Unit]
+Description=ninja-monitor per-service resource monitor
+Documentation=https://github.com/NinjaGoldfinch/ninja-monitor
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ninja-monitor
+Group=ninja-monitor
+# To measure data directories owned by other services, add their groups in a
+# drop-in (systemctl edit ninja-monitor) rather than here, for example:
+#   [Service]
+#   SupplementaryGroups=riot-proxy
+ExecStart=/usr/local/bin/ninja-monitor --config /etc/ninja-monitor/config.toml
+EnvironmentFile=/etc/ninja-monitor/env
+Restart=on-failure
+RestartSec=5s
+MemoryMax=64M
+
+# The daemon only reads /proc, /sys/fs/cgroup and the configured data paths,
+# listens on loopback and makes outbound HTTPS requests. It writes nothing.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

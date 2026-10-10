@@ -1,0 +1,97 @@
+# ninja-monitor configuration. Install as /etc/ninja-monitor/config.toml.
+# Durations are whole numbers with a unit: ms, s, m, h or d (for example 15s, 5m, 6h).
+# Unknown keys are rejected at startup, so typos fail loudly.
+
+[server]
+# Loopback only. Reach it with: ssh -L 9090:localhost:9090 <user>@<vps>
+bind = "127.0.0.1:9090"
+# allow_non_loopback = false
+
+[sampling]
+interval = "15s"        # how often to sample
+disk_interval = "10m"   # how often to measure per-service disk usage
+history = "24h"         # how much history to keep in memory
+
+[paths]
+cgroup_root = "/sys/fs/cgroup"
+proc_root = "/proc"
+
+[host]
+name = "vps"            # shown in alert messages
+mounts = ["/"]          # filesystems to report free space for
+
+# One [[service]] block per systemd unit to watch.
+# Find unit names with:  systemctl list-units --type=service
+# Check cgroup paths with: systemd-cgtop -1
+
+[[service]]
+name = "riot-proxy"                     # PLACEHOLDER: short name used in the API and alerts
+unit = "riot-proxy.service"             # PLACEHOLDER: the real unit name
+paths = ["/var/lib/riot-proxy"]         # PLACEHOLDER: data directories to measure (may be empty)
+
+[[service]]
+name = "site"
+unit = "CHANGE-ME.service"              # PLACEHOLDER: the unit that runs the site
+paths = []
+
+[[service]]
+name = "cloudflared"
+unit = "cloudflared.service"
+# cgroup = "system.slice/cloudflared.service"   # optional override, relative to cgroup_root
+
+[discord]
+# The webhook URL is a secret and is NOT stored here. It is read from the
+# NINJA_MONITOR_DISCORD_WEBHOOK environment variable (see /etc/ninja-monitor/env).
+enabled = true
+startup_message = true  # post "STARTED" on every start, so a restart loop is visible
+
+[heartbeat]
+# Sends a GET to the URL in the named environment variable every interval,
+# so an external checker notices if the box dies.
+enabled = false
+url_env = "NINJA_MONITOR_HEARTBEAT_URL"
+interval = "60s"
+
+# Alert rules. Host metrics: cpu_percent, load1, mem_available_percent,
+# mem_available_bytes, swap_used_percent, disk_used_percent (needs mount).
+# Service metrics: cpu_percent, mem_anon_bytes, mem_current_bytes, pids,
+# disk_bytes, down, oom_kill.
+# Operators: >, >=, <, <=. `for` is how long the condition must hold before
+# firing (omit to fire on the first match). `repeat` re-sends while firing.
+
+[[alert]]
+name = "riot-proxy memory high"
+scope = "service:riot-proxy"
+metric = "mem_anon_bytes"       # the service's own memory, not reclaimable cache
+op = ">"
+threshold = 2000000000
+for = "5m"
+
+[[alert]]
+name = "host memory low"
+scope = "host"
+metric = "mem_available_percent"
+op = "<"
+threshold = 10
+for = "5m"
+
+[[alert]]
+name = "disk filling"
+scope = "host"
+metric = "disk_used_percent"
+mount = "/"
+op = ">"
+threshold = 85
+for = "10m"
+repeat = "6h"
+
+[[alert]]
+name = "riot-proxy down"
+scope = "service:riot-proxy"
+metric = "down"
+for = "1m"
+
+[[alert]]
+name = "riot-proxy OOM kill"
+scope = "service:riot-proxy"
+metric = "oom_kill"             # fires immediately when the counter increases

@@ -776,6 +776,15 @@ mod tests {
     }
 
     #[test]
+    fn shipped_configs_are_valid() {
+        let example = Config::parse(include_str!("../deploy/config.example.toml")).unwrap();
+        assert_eq!(example.services.len(), 3);
+        assert_eq!(example.alerts.len(), 5);
+        assert!(example.discord.enabled && !example.heartbeat.enabled);
+        Config::parse(include_str!("../dev/config.toml")).unwrap();
+    }
+
+    #[test]
     fn missing_file_is_a_clear_error() {
         let msg = format!(
             "{:#}",
