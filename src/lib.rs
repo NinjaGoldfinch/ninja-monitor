@@ -1,5 +1,6 @@
 //! ninja-monitor: a lightweight per-service resource monitor.
 
+pub mod alerts;
 pub mod api;
 pub mod config;
 pub mod history;
@@ -8,14 +9,17 @@ pub mod sampler;
 pub mod store;
 
 use std::future::Future;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
+use tracing::warn;
 
-use crate::config::Config;
+use crate::alerts::Engine;
+use crate::alerts::notify::{self, Discord, Queue};
+use crate::config::{Config, DISCORD_WEBHOOK_ENV, Secrets};
 use crate::sampler::{Sampler, walk};
 use crate::store::Store;
 
@@ -26,16 +30,48 @@ const BUS_CAPACITY: usize = 16;
 /// `shutdown` resolves.
 pub async fn run(
     config: Config,
+    secrets: Secrets,
     listener: TcpListener,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let (bus, _) = broadcast::channel(BUS_CAPACITY);
     let store = Arc::new(Store::new(&config));
+    let engine = Arc::new(Mutex::new(Engine::new(&config)));
     let stop_walks = Arc::new(AtomicBool::new(false));
+    let agent = notify::http_agent();
     let mut tasks = Vec::new();
+
+    let queue = match (&secrets.discord_webhook, config.discord.enabled) {
+        (Some(url), true) => {
+            let queue = Arc::new(Queue::new(notify::QUEUE_CAPACITY));
+            if config.discord.startup_message {
+                queue.push(format!(
+                    "**STARTED** [{}] ninja-monitor {} is running",
+                    config.host.name,
+                    env!("CARGO_PKG_VERSION")
+                ));
+            }
+            let discord = Discord::new(agent.clone(), url.clone());
+            tasks.push(tokio::spawn(notify::run(queue.clone(), discord)));
+            Some(queue)
+        }
+        (None, true) => {
+            warn!(
+                "discord.enabled is true but {DISCORD_WEBHOOK_ENV} is not set; running without notifications"
+            );
+            None
+        }
+        (_, false) => None,
+    };
 
     // Subscribe before the sampler starts so the first sample is not missed.
     tasks.push(tokio::spawn(store::run(store.clone(), bus.subscribe())));
+    tasks.push(tokio::spawn(alerts::run(
+        engine.clone(),
+        bus.subscribe(),
+        queue,
+        config.host.name.clone(),
+    )));
 
     let mut sampler = Sampler::new(&config);
     let service_paths: Vec<_> = config.services.iter().map(|s| s.paths.clone()).collect();
@@ -55,7 +91,7 @@ pub async fn run(
         bus,
     )));
 
-    let state = api::AppState::new(store, config.sampling.history);
+    let state = api::AppState::new(store, engine, config.sampling.history);
     let result = axum::serve(listener, api::router(state))
         .with_graceful_shutdown(shutdown)
         .await

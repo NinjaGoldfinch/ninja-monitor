@@ -1,6 +1,6 @@
 //! Loopback-only JSON API.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::rejection::QueryRejection;
@@ -12,6 +12,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::alerts::Engine;
 use crate::config::Scope;
 use crate::history;
 use crate::sampler::unix_millis;
@@ -23,14 +24,16 @@ const DEFAULT_MAX_POINTS: usize = 720;
 #[derive(Clone)]
 pub struct AppState {
     store: Arc<Store>,
+    engine: Arc<Mutex<Engine>>,
     started: Instant,
     history_minutes: u64,
 }
 
 impl AppState {
-    pub fn new(store: Arc<Store>, history: Duration) -> Self {
+    pub fn new(store: Arc<Store>, engine: Arc<Mutex<Engine>>, history: Duration) -> Self {
         Self {
             store,
+            engine,
             started: Instant::now(),
             history_minutes: history.as_secs().div_ceil(60).max(1),
         }
@@ -42,6 +45,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/stats", get(stats))
         .route("/history", get(history))
+        .route("/alerts", get(alerts))
         .fallback(not_found)
         .with_state(state)
 }
@@ -60,6 +64,15 @@ async fn stats(State(state): State<AppState>) -> Response {
         Some(sample) => Json(sample.as_ref()).into_response(),
         None => error(StatusCode::SERVICE_UNAVAILABLE, "no sample taken yet"),
     }
+}
+
+async fn alerts(State(state): State<AppState>) -> Response {
+    let view = state
+        .engine
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .view();
+    Json(view).into_response()
 }
 
 #[derive(Deserialize)]

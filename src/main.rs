@@ -7,7 +7,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tracing::info;
 use tracing::level_filters::LevelFilter;
 
-use ninja_monitor::config::{Config, DEFAULT_CONFIG_PATH};
+use ninja_monitor::config::{Config, DEFAULT_CONFIG_PATH, Secrets};
 
 const USAGE: &str = "\
 Usage: ninja-monitor [--config <path>]
@@ -75,6 +75,7 @@ async fn main() -> ExitCode {
 
 async fn run(config_path: PathBuf) -> anyhow::Result<()> {
     let config = Config::load(&config_path)?;
+    let secrets = Secrets::from_env(&config);
     let listener = TcpListener::bind(config.server.bind)
         .await
         .with_context(|| format!("cannot listen on {}", config.server.bind))?;
@@ -95,7 +96,7 @@ async fn run(config_path: PathBuf) -> anyhow::Result<()> {
         "ninja-monitor {} started",
         env!("CARGO_PKG_VERSION")
     );
-    ninja_monitor::run(config, listener, shutdown).await?;
+    ninja_monitor::run(config, secrets, listener, shutdown).await?;
     info!("stopped");
     Ok(())
 }

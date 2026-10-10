@@ -250,6 +250,23 @@ impl Metric {
         )
     }
 
+    pub fn name(self) -> &'static str {
+        match self {
+            Metric::CpuPercent => "cpu_percent",
+            Metric::Load1 => "load1",
+            Metric::MemAvailablePercent => "mem_available_percent",
+            Metric::MemAvailableBytes => "mem_available_bytes",
+            Metric::SwapUsedPercent => "swap_used_percent",
+            Metric::DiskUsedPercent => "disk_used_percent",
+            Metric::MemAnonBytes => "mem_anon_bytes",
+            Metric::MemCurrentBytes => "mem_current_bytes",
+            Metric::Pids => "pids",
+            Metric::DiskBytes => "disk_bytes",
+            Metric::Down => "down",
+            Metric::OomKill => "oom_kill",
+        }
+    }
+
     /// `down` and `oom_kill` take no operator or threshold.
     pub fn is_comparison(self) -> bool {
         !matches!(self, Metric::Down | Metric::OomKill)
@@ -266,6 +283,64 @@ pub enum Op {
     Lt,
     #[serde(rename = "<=")]
     Le,
+}
+
+impl Op {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Op::Gt => ">",
+            Op::Ge => ">=",
+            Op::Lt => "<",
+            Op::Le => "<=",
+        }
+    }
+
+    pub fn holds(self, value: f64, threshold: f64) -> bool {
+        match self {
+            Op::Gt => value > threshold,
+            Op::Ge => value >= threshold,
+            Op::Lt => value < threshold,
+            Op::Le => value <= threshold,
+        }
+    }
+}
+
+pub const DISCORD_WEBHOOK_ENV: &str = "NINJA_MONITOR_DISCORD_WEBHOOK";
+
+/// URLs that must never appear in config, logs or API responses.
+#[derive(Clone, Default)]
+pub struct Secrets {
+    pub discord_webhook: Option<String>,
+    pub heartbeat_url: Option<String>,
+}
+
+impl Secrets {
+    /// Reads only the variables the config enables. Empty values count as unset.
+    pub fn from_env(config: &Config) -> Self {
+        let read = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+        Self {
+            discord_webhook: config
+                .discord
+                .enabled
+                .then(|| read(DISCORD_WEBHOOK_ENV))
+                .flatten(),
+            heartbeat_url: config
+                .heartbeat
+                .enabled
+                .then(|| read(&config.heartbeat.url_env))
+                .flatten(),
+        }
+    }
+}
+
+impl fmt::Debug for Secrets {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let set = |v: &Option<String>| if v.is_some() { "<set>" } else { "<unset>" };
+        f.debug_struct("Secrets")
+            .field("discord_webhook", &set(&self.discord_webhook))
+            .field("heartbeat_url", &set(&self.heartbeat_url))
+            .finish()
+    }
 }
 
 impl Config {
@@ -678,6 +753,26 @@ mod tests {
         let rule = "[[alert]]\nname = \"x\"\nscope = \"host\"\nmetric = \"load1\"\nop = \">\"\nthreshold = 1\n";
         let msg = errors_for(&format!("{rule}{rule}"));
         assert!(msg.contains("duplicate alert name `x`"), "{msg}");
+    }
+
+    #[test]
+    fn operators() {
+        assert!(Op::Gt.holds(2.0, 1.0) && !Op::Gt.holds(1.0, 1.0));
+        assert!(Op::Ge.holds(1.0, 1.0) && !Op::Ge.holds(0.5, 1.0));
+        assert!(Op::Lt.holds(0.5, 1.0) && !Op::Lt.holds(1.0, 1.0));
+        assert!(Op::Le.holds(1.0, 1.0) && !Op::Le.holds(1.5, 1.0));
+    }
+
+    #[test]
+    fn secrets_debug_is_redacted() {
+        let secrets = Secrets {
+            discord_webhook: Some("https://discord.com/api/webhooks/1/secret".into()),
+            heartbeat_url: None,
+        };
+        let text = format!("{secrets:?}");
+        assert!(!text.contains("discord.com") && !text.contains("webhooks"));
+        assert!(text.contains("<set>"));
+        assert!(text.contains("<unset>"));
     }
 
     #[test]

@@ -37,3 +37,34 @@ unit = "site.service"     # no fixture directory, so this one shows as down
 
 [discord]
 enabled = false
+
+# Notifications only go out if NINJA_MONITOR_DISCORD_WEBHOOK is set.
+
+# The simulator moves riot-proxy's anon memory between about 199 and 249 MiB,
+# so this rule goes pending, fires and resolves now and then.
+[[alert]]
+name = "riot-proxy memory high"
+scope = "service:riot-proxy"
+metric = "mem_anon_bytes"
+op = ">"
+threshold = 235000000
+for = "10s"
+
+[[alert]]
+name = "host memory low"
+scope = "host"
+metric = "mem_available_percent"
+op = "<"
+threshold = 10
+for = "5m"
+
+[[alert]]
+name = "site down"
+scope = "service:site"
+metric = "down"
+for = "15s"
+
+[[alert]]
+name = "riot-proxy OOM kill"
+scope = "service:riot-proxy"
+metric = "oom_kill"
