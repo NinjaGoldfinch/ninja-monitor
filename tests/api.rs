@@ -24,12 +24,20 @@ struct App {
 
 impl App {
     fn start(interval: &str) -> App {
+        Self::start_with(interval, "24h")
+    }
+
+    fn start_with(interval: &str, history: &str) -> App {
         let root = TempDir::new().unwrap();
         copy_dir(Path::new(FIXTURES), root.path());
+        fs::create_dir(root.path().join("data")).unwrap();
+        fs::write(root.path().join("data/db"), vec![1u8; 300_000]).unwrap();
         let config = Config::parse(&format!(
             r#"
             [sampling]
             interval = "{interval}"
+            history = "{history}"
+            disk_interval = "100ms"
             [paths]
             proc_root = "{root}/proc"
             cgroup_root = "{root}/cgroup"
@@ -42,6 +50,7 @@ impl App {
             [[service]]
             name = "riot-proxy"
             unit = "riot-proxy.service"
+            paths = ["{root}/data"]
             [[service]]
             name = "site"
             unit = "site.service"
@@ -307,4 +316,129 @@ fn healthz_and_unknown_routes() {
     let (status, body) = app.get("/nope");
     assert_eq!(status, 404);
     assert_eq!(body["error"], "not found");
+}
+
+fn column_len(body: &Value, key: &str) -> usize {
+    body[key]
+        .as_array()
+        .unwrap_or_else(|| panic!("{key} missing"))
+        .len()
+}
+
+#[test]
+fn history_returns_columns_for_host_and_services() {
+    let app = App::start("100ms");
+    // Wait for several samples.
+    thread::sleep(Duration::from_millis(700));
+
+    let (status, body) = app.get("/history?scope=host&minutes=5");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["scope"], "host");
+    assert_eq!(body["minutes"], 5);
+    assert_eq!(body["bucket"], 1);
+    let n = column_len(&body, "t");
+    assert!(n >= 4, "only {n} host points");
+    for key in [
+        "cpu_percent",
+        "load1",
+        "mem_available_bytes",
+        "mem_used_bytes",
+        "swap_used_bytes",
+    ] {
+        assert_eq!(column_len(&body, key), n, "{key}");
+    }
+    let to = body["to"].as_u64().unwrap();
+    assert_eq!(body["from"].as_u64().unwrap(), to - 5 * 60_000);
+    let t: Vec<u64> = body["t"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap())
+        .collect();
+    assert!(t.windows(2).all(|w| w[0] < w[1]), "times not increasing");
+    assert!(t.iter().all(|&x| x <= to && x >= to - 5 * 60_000));
+    assert_eq!(
+        body["cpu_percent"][0],
+        Value::Null,
+        "first sample has no CPU"
+    );
+    assert_eq!(body["mem_available_bytes"][0], 3167336u64 * 1024);
+    assert_eq!(
+        body["disks"][0]["mount"],
+        app.root.path().display().to_string()
+    );
+    assert_eq!(column_len(&body["disks"][0], "used_percent"), n);
+
+    let (status, body) = app.get("/history?scope=service:cloudflared");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["scope"], "service:cloudflared");
+    assert_eq!(body["minutes"], 60);
+    let n = column_len(&body, "t");
+    assert!(n >= 4);
+    assert_eq!(body["up"][0], 1.0);
+    assert_eq!(body["mem_anon_bytes"][0], 16326656);
+    assert_eq!(body["pids"][0], 8);
+    assert_eq!(column_len(&body, "oom_kills"), n);
+
+    let (_, body) = app.get("/history?scope=service:site");
+    assert!(body["up"].as_array().unwrap().iter().all(|v| v == 0.0));
+    assert!(
+        body["mem_current_bytes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(Value::is_null)
+    );
+}
+
+#[test]
+fn history_downsamples_to_max_points() {
+    let app = App::start("100ms");
+    thread::sleep(Duration::from_millis(1000));
+
+    let (_, full) = app.get("/history?scope=service:riot-proxy");
+    let n = column_len(&full, "t");
+    assert!(n >= 6, "only {n} points");
+
+    let (status, body) = app.get("/history?scope=service:riot-proxy&max_points=3");
+    assert_eq!(status, 200);
+    let points = column_len(&body, "t");
+    assert!((1..=3).contains(&points), "{points} points");
+    let bucket = body["bucket"].as_u64().unwrap() as usize;
+    assert!(bucket >= 2);
+    assert_eq!(column_len(&body, "mem_anon_bytes"), points);
+    // Constant fixture values average to themselves.
+    assert_eq!(body["mem_anon_bytes"][0], 208506880);
+
+    let (_, one) = app.get("/history?scope=host&max_points=1");
+    assert_eq!(column_len(&one, "t"), 1);
+    assert_eq!(column_len(&one["disks"][0], "used_bytes"), 1);
+}
+
+#[test]
+fn history_minutes_capped_at_history_length() {
+    let app = App::start_with("100ms", "2m");
+    let (status, body) = app.get("/history?scope=host&minutes=100000");
+    assert_eq!(status, 200);
+    assert_eq!(body["minutes"], 2);
+}
+
+#[test]
+fn history_bad_requests() {
+    let app = App::start("1h");
+    for (path, status) in [
+        ("/history", 400),
+        ("/history?scope=host&minutes=0", 400),
+        ("/history?scope=host&minutes=-5", 400),
+        ("/history?scope=host&minutes=abc", 400),
+        ("/history?scope=host&max_points=0", 400),
+        ("/history?scope=host&max_points=1.5", 400),
+        ("/history?scope=service:nope", 404),
+        ("/history?scope=galaxy", 404),
+        ("/history?scope=service:", 404),
+    ] {
+        let (got, body) = app.get(path);
+        assert_eq!(got, status, "{path}: {body}");
+        assert!(body["error"].as_str().is_some(), "{path}: {body}");
+    }
 }

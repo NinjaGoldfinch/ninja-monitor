@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod config;
+pub mod history;
 pub mod sample;
 pub mod sampler;
 pub mod store;
@@ -28,7 +29,7 @@ pub async fn run(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let (bus, _) = broadcast::channel(BUS_CAPACITY);
-    let store = Arc::new(Store::new());
+    let store = Arc::new(Store::new(&config));
 
     // Subscribe before the sampler starts so the first sample is not missed.
     let tasks = [
@@ -40,8 +41,8 @@ pub async fn run(
         )),
     ];
 
-    let app = api::router(api::AppState::new(store));
-    let result = axum::serve(listener, app)
+    let state = api::AppState::new(store, config.sampling.history);
+    let result = axum::serve(listener, api::router(state))
         .with_graceful_shutdown(shutdown)
         .await
         .context("HTTP server failed");
