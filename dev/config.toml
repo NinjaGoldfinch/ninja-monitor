@@ -1,0 +1,37 @@
+# Local development config. Reads the live copy of the fixture trees that
+# dev/simulate.sh keeps up to date. Run from the repository root:
+#
+#   dev/simulate.sh                              # terminal 1
+#   cargo run -- --config dev/config.toml        # terminal 2
+#   curl -s localhost:9090/stats                 # terminal 3
+
+[server]
+bind = "127.0.0.1:9090"
+
+[sampling]
+interval = "5s"
+disk_interval = "1m"
+history = "1h"
+
+[paths]
+cgroup_root = "dev/live/cgroup"
+proc_root = "dev/live/proc"
+
+[host]
+name = "dev"
+mounts = ["/"]
+
+[[service]]
+name = "riot-proxy"
+unit = "riot-proxy.service"
+
+[[service]]
+name = "cloudflared"
+unit = "cloudflared.service"
+
+[[service]]
+name = "site"
+unit = "site.service"     # no fixture directory, so this one shows as down
+
+[discord]
+enabled = false
