@@ -3,6 +3,7 @@
 pub mod alerts;
 pub mod api;
 pub mod config;
+pub mod heartbeat;
 pub mod history;
 pub mod sample;
 pub mod sampler;
@@ -15,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::alerts::Engine;
 use crate::alerts::notify::{self, Discord, Queue};
@@ -90,6 +91,23 @@ pub async fn run(
         config.sampling.interval,
         bus,
     )));
+
+    if config.heartbeat.enabled {
+        match &secrets.heartbeat_url {
+            Some(url) => {
+                info!(interval = ?config.heartbeat.interval, "heartbeat enabled");
+                tasks.push(tokio::spawn(heartbeat::run(
+                    agent,
+                    url.clone(),
+                    config.heartbeat.interval,
+                )));
+            }
+            None => warn!(
+                "heartbeat.enabled is true but {} is not set; running without a heartbeat",
+                config.heartbeat.url_env
+            ),
+        }
+    }
 
     let state = api::AppState::new(store, engine, config.sampling.history);
     let result = axum::serve(listener, api::router(state))

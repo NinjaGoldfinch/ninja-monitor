@@ -153,6 +153,40 @@ fn alerts_endpoint_without_rules() {
     assert_eq!(body["events"], serde_json::json!([]));
 }
 
+#[test]
+fn heartbeat_pings_on_interval() {
+    let stub = Stub::start();
+    let secrets = Secrets {
+        discord_webhook: None,
+        heartbeat_url: Some(format!("{}/ping/abc", stub.url)),
+    };
+    let extra = "[heartbeat]\nenabled = true\ninterval = \"100ms\"";
+    let _app = App::start_full("1h", "1h", extra, secrets);
+    wait_until("three heartbeats", || {
+        (stub.requests().len() >= 3).then_some(())
+    });
+    for request in stub.requests() {
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, "/ping/abc");
+    }
+}
+
+#[test]
+fn heartbeat_survives_failures() {
+    let stub = Stub::start();
+    stub.reply_next(500, "");
+    stub.reply_next(503, "");
+    let secrets = Secrets {
+        discord_webhook: None,
+        heartbeat_url: Some(format!("{}/ping", stub.url)),
+    };
+    let extra = "[heartbeat]\nenabled = true\ninterval = \"100ms\"";
+    let _app = App::start_full("1h", "1h", extra, secrets);
+    wait_until("pings after failures", || {
+        (stub.requests().len() >= 4).then_some(())
+    });
+}
+
 fn discord(stub: &Stub) -> Discord {
     Discord::with_backoff(
         http_agent(),
