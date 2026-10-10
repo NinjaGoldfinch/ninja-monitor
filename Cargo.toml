@@ -2,6 +2,13 @@
 name = "ninja-monitor"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+description = "Lightweight per-service CPU, memory and disk monitor for a single Linux VPS"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/NinjaGoldfinch/ninja-monitor"
+readme = "README.md"
+keywords = ["monitoring", "systemd", "cgroup", "discord", "vps"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0.104"
