@@ -66,7 +66,8 @@ jobs:
       - name: Smoke test
         run: |
           bin="target/$TARGET/release/ninja-monitor"
-          file "$bin" | tee /dev/stderr | grep -q 'statically linked'
+          # x86_64 musl builds are static-pie, aarch64 ones plain static.
+          file "$bin" | tee /dev/stderr | grep -Eq 'static(ally|-pie) linked'
           "$bin" --version
           "$bin" --init > generated.toml
           "$bin" --check --config generated.toml
