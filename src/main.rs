@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Context;
@@ -15,6 +15,7 @@ Usage: ninja-monitor [--config <path>]
 Options:
   --config <path>  Config file (default /etc/ninja-monitor/config.toml)
   --check          Validate the config, check the paths it names, then exit
+  --init           Print a starting config for the services running here
   -h, --help       Show this help
   -V, --version    Show the version
 
@@ -25,6 +26,7 @@ Environment:
 enum Command {
     Run(PathBuf),
     Check(PathBuf),
+    Init,
     Help,
     Version,
 }
@@ -35,6 +37,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Command, String>
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--check" => check = true,
+            "--init" => return Ok(Command::Init),
             "-h" | "--help" => return Ok(Command::Help),
             "-V" | "--version" => return Ok(Command::Version),
             "--config" => {
@@ -58,6 +61,17 @@ async fn main() -> ExitCode {
     let config_path = match parse_args(std::env::args().skip(1)) {
         Ok(Command::Run(path)) => path,
         Ok(Command::Check(path)) => return check(&path),
+        Ok(Command::Init) => {
+            use ninja_monitor::init;
+            let (proc_root, cgroup_root) = (Path::new("/proc"), Path::new("/sys/fs/cgroup"));
+            let services = init::detect(cgroup_root, init::systemd_state_paths);
+            let threshold = init::memory_threshold(proc_root);
+            print!(
+                "{}",
+                init::render(&init::host_name(proc_root), &services, threshold)
+            );
+            return ExitCode::SUCCESS;
+        }
         Ok(Command::Help) => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -143,7 +157,6 @@ fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     fn parse(args: &[&str]) -> Result<Command, String> {
         parse_args(args.iter().map(|s| s.to_string()))
@@ -159,6 +172,7 @@ mod tests {
             matches!(parse(&["--config=b.toml"]), Ok(Command::Run(p)) if p == Path::new("b.toml"))
         );
         assert!(matches!(parse(&["--help"]), Ok(Command::Help)));
+        assert!(matches!(parse(&["--init"]), Ok(Command::Init)));
         assert!(
             matches!(parse(&["--check", "--config", "c.toml"]), Ok(Command::Check(p)) if p == Path::new("c.toml"))
         );

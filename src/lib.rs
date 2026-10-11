@@ -6,6 +6,7 @@ pub mod check;
 pub mod config;
 pub mod heartbeat;
 pub mod history;
+pub mod init;
 pub mod sample;
 pub mod sampler;
 pub mod store;
