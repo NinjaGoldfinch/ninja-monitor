@@ -517,12 +517,12 @@ pub fn parse_duration(text: &str) -> Result<Duration, String> {
         .ok_or_else(|| format!("duration `{text}` is too large"))
 }
 
-fn de_duration<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+pub fn de_duration<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
     let text = String::deserialize(deserializer)?;
     parse_duration(&text).map_err(serde::de::Error::custom)
 }
 
-fn de_opt_duration<'de, D: Deserializer<'de>>(
+pub fn de_opt_duration<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Duration>, D::Error> {
     de_duration(deserializer).map(Some)

@@ -1,8 +1,12 @@
 //! The immutable snapshot the sampler publishes on the bus every tick.
+//!
+//! These types are also the wire format pushed to ninja-ingest, which is why
+//! they deserialize too. Adding a field is fine; renaming or removing one is
+//! a protocol change.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sample {
     /// Unix milliseconds, UTC.
     pub timestamp: u64,
@@ -10,7 +14,7 @@ pub struct Sample {
     pub services: Vec<ServiceSample>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostSample {
     pub name: String,
     /// Busy time across all cores, 0 to 100. `null` on the first sample.
@@ -29,7 +33,7 @@ pub struct HostSample {
     pub disks: Vec<DiskSample>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskSample {
     pub mount: String,
     pub total_bytes: Option<u64>,
@@ -38,14 +42,14 @@ pub struct DiskSample {
     pub used_percent: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServiceState {
     Running,
     Down,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceSample {
     pub name: String,
     pub unit: String,

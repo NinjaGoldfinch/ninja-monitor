@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "ingest"]
+default-members = [".", "ingest"]
+
 [package]
 name = "ninja-monitor"
 version = "0.1.0"

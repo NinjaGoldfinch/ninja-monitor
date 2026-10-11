@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
 use tracing::warn;
 
@@ -33,7 +33,7 @@ pub enum RuleState {
     Firing,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EventKind {
     Firing,
@@ -41,16 +41,18 @@ pub enum EventKind {
     Resolved,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// One alert transition. Also part of the ninja-ingest wire format, so it
+/// deserializes and owns its strings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AlertEvent {
     /// Unix milliseconds of the sample that triggered the event.
     pub timestamp: u64,
     pub rule: String,
     pub scope: String,
-    pub metric: &'static str,
+    pub metric: String,
     pub kind: EventKind,
     pub value: Option<f64>,
-    pub op: Option<&'static str>,
+    pub op: Option<String>,
     pub threshold: Option<f64>,
     /// How long the condition had held when the event was raised.
     pub held_secs: u64,
@@ -236,10 +238,10 @@ fn event(rt: &Runtime, sample: &Sample, kind: EventKind, held_secs: u64) -> Aler
         timestamp: sample.timestamp,
         rule: rt.rule.name.clone(),
         scope: rt.rule.scope.to_string(),
-        metric: rt.rule.metric.name(),
+        metric: rt.rule.metric.name().to_string(),
         kind,
         value: rt.last_value,
-        op: rt.rule.op.map(|o| o.symbol()),
+        op: rt.rule.op.map(|o| o.symbol().to_string()),
         threshold: rt.rule.threshold,
         held_secs,
     }
@@ -414,7 +416,7 @@ mod tests {
         assert_eq!(ev.kind, EventKind::Firing);
         assert_eq!(ev.value, Some((300 * MIB) as f64));
         assert_eq!(ev.threshold, Some(209715200.0));
-        assert_eq!(ev.op, Some(">"));
+        assert_eq!(ev.op.as_deref(), Some(">"));
         assert_eq!(ev.held_secs, 300);
         assert_eq!(ev.scope, "service:app");
         assert_eq!(state(&e), RuleState::Firing);

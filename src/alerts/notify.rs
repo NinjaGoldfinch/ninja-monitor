@@ -208,7 +208,7 @@ pub fn format_event(host: &str, e: &AlertEvent) -> String {
         EventKind::Repeat => "STILL FIRING",
         EventKind::Resolved => "RESOLVED",
     };
-    let detail = match e.metric {
+    let detail = match e.metric.as_str() {
         "down" => match e.kind {
             EventKind::Resolved => "service is running again".to_string(),
             _ => "service is down".to_string(),
@@ -222,7 +222,7 @@ pub fn format_event(host: &str, e: &AlertEvent) -> String {
             let value = e
                 .value
                 .map_or("n/a".to_string(), |v| format_value(metric, v));
-            match (e.op, e.threshold) {
+            match (e.op.as_deref(), e.threshold) {
                 (Some(op), Some(t)) => {
                     format!(
                         "{metric} = {value} (threshold {op} {})",
@@ -287,15 +287,15 @@ pub fn human_duration(secs: u64) -> String {
 mod tests {
     use super::*;
 
-    fn event(metric: &'static str, kind: EventKind, value: Option<f64>) -> AlertEvent {
+    fn event(metric: &str, kind: EventKind, value: Option<f64>) -> AlertEvent {
         AlertEvent {
             timestamp: 0,
             rule: "riot-proxy memory high".into(),
             scope: "service:riot-proxy".into(),
-            metric,
+            metric: metric.into(),
             kind,
             value,
-            op: Some(">"),
+            op: Some(">".into()),
             threshold: Some(2_000_000_000.0),
             held_secs: 312,
         }
