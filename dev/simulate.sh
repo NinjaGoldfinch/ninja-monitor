@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # the single-quoted strings are awk programs
 # Copies the fixture trees to dev/live and keeps changing their values so the
 # dev API shows moving data. Usage: dev/simulate.sh [seconds-between-updates]
 set -euo pipefail

@@ -1,0 +1,121 @@
+name: Release
+
+# Push a tag such as v0.2.0 (matching the version in Cargo.toml) to publish
+# static Linux binaries with checksums and build provenance.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build (${{ matrix.arch }})
+    needs: ci
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      ARCH: ${{ matrix.arch }}
+      TARGET: ${{ matrix.arch }}-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools
+          rustup toolchain install stable --profile minimal --target "$TARGET"
+          rustup default stable
+
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET"
+
+      - name: Smoke test
+        run: |
+          bin="target/$TARGET/release/ninja-monitor"
+          file "$bin" | tee /dev/stderr | grep -q 'statically linked'
+          "$bin" --version
+          "$bin" --init > generated.toml
+          "$bin" --check --config generated.toml
+
+      - name: Package
+        run: |
+          dir=ninja-monitor
+          mkdir "$dir"
+          cp "target/$TARGET/release/ninja-monitor" "$dir/"
+          cp deploy/install.sh deploy/ninja-monitor.service deploy/env.example \
+            deploy/config.example.toml README.md LICENSE-MIT LICENSE-APACHE "$dir/"
+          tar -czf "ninja-monitor-$ARCH-linux.tar.gz" "$dir"
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ninja-monitor-${{ matrix.arch }}-linux.tar.gz
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ninja-monitor-${{ matrix.arch }}-linux
+          path: ninja-monitor-${{ matrix.arch }}-linux.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ninja-monitor-*-linux
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          sha256sum ninja-monitor-*-linux.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            ninja-monitor-*-linux.tar.gz SHA256SUMS
