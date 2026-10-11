@@ -21,6 +21,7 @@ listens on loopback. The agents only ever connect outward.
 
 - [How the pieces fit](#how-the-pieces-fit)
 - [Setup](#setup)
+- [Running it in a Proxmox container](#running-it-in-a-proxmox-container)
 - [Putting it behind cloudflared](#putting-it-behind-cloudflared)
 - [Configuration](#configuration)
 - [Tokens](#tokens)
@@ -113,6 +114,9 @@ What it sets up:
   only place the daemon may write),
 - the systemd unit `ninja-ingest.service`.
 
+On a Proxmox node, [`proxmox-setup.sh`](#running-it-in-a-proxmox-container)
+does all of this inside a fresh container for you.
+
 ### Building from source
 
 Same as the agent: `cargo build --release` in a checkout builds both
@@ -122,11 +126,86 @@ server, `cargo build --release -p ninja-ingest`. The agent README covers
 cross-compiling a static binary from macOS; use the same command with
 `-p ninja-ingest`.
 
+## Running it in a Proxmox container
+
+The natural home for ninja-ingest on a Proxmox node is a small unprivileged
+LXC container: Debian 12, one core, 512 MiB, an 8 GiB disk, no swap.
+[`proxmox-setup.sh`](../deploy/proxmox-setup.sh) builds that container and
+everything inside it in one go. Only the script is needed on the Proxmox
+host; it downloads the release inside the container. Run it as root:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/NinjaGoldfinch/ninja-monitor/main/deploy/proxmox-setup.sh
+sh proxmox-setup.sh --agent vps
+```
+
+(The same script ships in the `ninja-ingest` release tarball.)
+
+It asks for the Discord webhook and a Cloudflare Tunnel token (both typed
+hidden, both optional), then without further input:
+
+1. downloads the newest Debian 12 template if the node does not have it,
+2. creates the container with the next free id, `nesting=1` (so systemd
+   can set up the hardened unit's namespaces inside an unprivileged
+   container), `onboot`, and DHCP on `vmbr0`,
+3. installs ninja-ingest from the release inside it, adds each `--agent`,
+   stores the webhook and starts the service,
+4. installs cloudflared from Cloudflare's apt repository and enrols it in
+   your tunnel with the token,
+5. prints the agents' tokens once, and the next steps.
+
+Secrets reach the container through a root-only file that is deleted
+afterwards, never through a command line. Options cover the usual knobs:
+`--id`, `--hostname`, `--storage`, `--bridge`, a static `--ip
+192.168.1.50/24,gw=192.168.1.1`, `--memory`, `--disk`, and `--release
+v0.2.0` to pin a version. `--help` lists them all.
+
+Afterwards the container is an ordinary one: `pct enter <id>` for a shell,
+and `pct exec <id> -- /root/ninja-ingest/install-ingest.sh --add-agent
+<name> --start` to add a host later. Upgrades are the normal download and
+`install-ingest.sh --start` inside it.
+
+### One container or two?
+
+By default cloudflared runs **inside the same container**, talking to
+ninja-ingest over loopback. Nothing in the container listens on the
+network, and the two services are useless without each other anyway, so
+sharing a container costs nothing. This is the right choice for a tunnel
+dedicated to ninja-ingest.
+
+Run cloudflared **in a separate container** only if you already have one
+fronting other services on the node. One tunnel can carry many public
+hostnames, so adding `ingest.example.net` to it is less to manage than a
+second tunnel, and cloudflared's frequent updates stay away from the
+container holding your database. The cost is that ninja-ingest must then
+listen on its container's bridge address rather than loopback, and the hop
+between the containers is plain HTTP on your LAN, where the read routes have
+no authentication of their own. For that layout use:
+
+```sh
+sh proxmox-setup.sh --agent vps --expose
+```
+
+which skips cloudflared, binds ninja-ingest on `0.0.0.0:9091` with
+`allow_non_loopback = true`, and prints the container's address to point
+the existing tunnel's public hostname at.
+
+### Doing it by hand
+
+The script is a convenience. The equivalent by hand is `pct create` with
+the flags above, then inside the container the [Setup](#setup) steps, then
+the cloudflared install from the [Cloudflare
+docs](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+and `cloudflared service install <token>`.
+
 ## Putting it behind cloudflared
 
 ninja-ingest only listens on `127.0.0.1:9091`. Give it a public name with a
-Cloudflare Tunnel on the same machine. In the tunnel's ingress
-configuration (`/etc/cloudflared/config.yml` or the dashboard):
+Cloudflare Tunnel. With a remote-managed tunnel (the kind
+`proxmox-setup.sh` enrols with a token) the routing lives in the Zero Trust
+dashboard: Networks > Tunnels > your tunnel > Public Hostname, add
+`ingest.example.net` with service `http://localhost:9091`. With a locally
+configured tunnel, the same thing in `/etc/cloudflared/config.yml`:
 
 ```yaml
 ingress:
@@ -152,6 +231,30 @@ access curl`.
 A frontend on another hostname (say `ninjagoldfinch.com`) calls the read API
 cross-origin; list it in `cors_origins` and it gets the usual CORS headers.
 Only `GET` and `OPTIONS` are allowed through, without credentials.
+
+### Without cloudflared
+
+Any TLS-terminating reverse proxy works instead, at the cost of an open
+inbound port on your router and a DNS record for your home address. The
+proxy must provide what Cloudflare Access was providing: a login on
+everything except `/v1/ingest`, which the agents reach with their own
+tokens. With Caddy, which fetches its own certificate:
+
+```text
+ingest.example.net {
+    @agents path /v1/ingest
+    reverse_proxy @agents localhost:9091
+
+    basic_auth {
+        ninja <hash from: caddy hash-password>
+    }
+    reverse_proxy localhost:9091
+}
+```
+
+Both ends refuse an unencrypted path across the internet: the agent will
+not push to a plain `http://` URL unless the host is loopback, and
+ninja-ingest will not bind outside loopback unless told to.
 
 ## Configuration
 

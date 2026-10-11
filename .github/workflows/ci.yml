@@ -55,4 +55,4 @@ jobs:
           persist-credentials: false
 
       - name: Shellcheck
-        run: shellcheck deploy/install.sh deploy/install-ingest.sh dev/simulate.sh
+        run: shellcheck deploy/install.sh deploy/install-ingest.sh deploy/proxmox-setup.sh dev/simulate.sh
