@@ -45,13 +45,15 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check the tag matches Cargo.toml
+      - name: Check the tag matches both Cargo.toml files
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
-            exit 1
-          fi
+          for manifest in Cargo.toml ingest/Cargo.toml; do
+            version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$manifest" | head -n 1)
+            if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match $manifest version $version"
+              exit 1
+            fi
+          done
 
       - name: Install toolchain
         run: |
@@ -61,16 +63,21 @@ jobs:
           rustup default stable
 
       - name: Build
-        run: cargo build --release --locked --target "$TARGET"
+        run: cargo build --release --locked --workspace --target "$TARGET"
 
       - name: Smoke test
         run: |
-          bin="target/$TARGET/release/ninja-monitor"
+          out="target/$TARGET/release"
           # x86_64 musl builds are static-pie, aarch64 ones plain static.
-          file "$bin" | tee /dev/stderr | grep -Eq 'static(ally|-pie) linked'
-          "$bin" --version
-          "$bin" --init > generated.toml
-          "$bin" --check --config generated.toml
+          for bin in "$out/ninja-monitor" "$out/ninja-ingest"; do
+            file "$bin" | tee /dev/stderr | grep -Eq 'static(ally|-pie) linked'
+            "$bin" --version
+          done
+          "$out/ninja-monitor" --init > generated.toml
+          "$out/ninja-monitor" --check --config generated.toml
+          mkdir state
+          printf 'storage.path = "state/ingest.db"\n[[agent]]\nname = "vps"\ntoken_env = "T"\n' > ingest.toml
+          T=$("$out/ninja-ingest" --new-token) "$out/ninja-ingest" --check --config ingest.toml
 
       - name: Package
         run: |
@@ -81,15 +88,27 @@ jobs:
             deploy/config.example.toml README.md LICENSE-MIT LICENSE-APACHE "$dir/"
           tar -czf "ninja-monitor-$ARCH-linux.tar.gz" "$dir"
 
+          dir=ninja-ingest
+          mkdir "$dir"
+          cp "target/$TARGET/release/ninja-ingest" "$dir/"
+          cp deploy/install-ingest.sh deploy/ninja-ingest.service deploy/ingest.env.example \
+            deploy/ingest.config.example.toml LICENSE-MIT LICENSE-APACHE "$dir/"
+          cp ingest/README.md "$dir/README.md"
+          tar -czf "ninja-ingest-$ARCH-linux.tar.gz" "$dir"
+
       - name: Attest build provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: ninja-monitor-${{ matrix.arch }}-linux.tar.gz
+          subject-path: |
+            ninja-monitor-${{ matrix.arch }}-linux.tar.gz
+            ninja-ingest-${{ matrix.arch }}-linux.tar.gz
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ninja-monitor-${{ matrix.arch }}-linux
-          path: ninja-monitor-${{ matrix.arch }}-linux.tar.gz
+          name: ninja-${{ matrix.arch }}-linux
+          path: |
+            ninja-monitor-${{ matrix.arch }}-linux.tar.gz
+            ninja-ingest-${{ matrix.arch }}-linux.tar.gz
           if-no-files-found: error
 
   release:
@@ -102,12 +121,12 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: ninja-monitor-*-linux
+          pattern: ninja-*-linux
           merge-multiple: true
 
       - name: Checksums
         run: |
-          sha256sum ninja-monitor-*-linux.tar.gz > SHA256SUMS
+          sha256sum ninja-*-linux.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create release
@@ -119,4 +138,4 @@ jobs:
             --verify-tag \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            ninja-monitor-*-linux.tar.gz SHA256SUMS
+            ninja-*-linux.tar.gz SHA256SUMS

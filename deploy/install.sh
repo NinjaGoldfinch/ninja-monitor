@@ -10,6 +10,7 @@
 #   --start        enable the service and (re)start it
 #   --webhook      prompt for the Discord webhook URL and save it
 #   --heartbeat    prompt for a heartbeat URL, save it and turn the heartbeat on
+#   --push         prompt for a ninja-ingest URL and token, save them and turn pushing on
 #   --reconfigure  regenerate the config from running services (old one kept as .bak)
 #   --uninstall    stop and remove the service, binary and user (keeps /etc/ninja-monitor)
 set -eu
@@ -20,16 +21,17 @@ user=ninja-monitor
 installed=/usr/local/bin/ninja-monitor
 unit=/etc/systemd/system/ninja-monitor.service
 
-start=no webhook=no heartbeat=no reconfigure=no uninstall=no bin=
+start=no webhook=no heartbeat=no push=no reconfigure=no uninstall=no bin=
 for arg in "$@"; do
     case $arg in
         --start) start=yes ;;
         --webhook) webhook=yes ;;
         --heartbeat) heartbeat=yes ;;
+        --push) push=yes ;;
         --reconfigure) reconfigure=yes ;;
         --uninstall) uninstall=yes ;;
         -h | --help)
-            sed -n '2,15s/^# \{0,1\}//p' "$0"
+            sed -n '2,16s/^# \{0,1\}//p' "$0"
             exit 0
             ;;
         -*)
@@ -111,6 +113,14 @@ if [ ! -e "$etc/config.toml" ] || [ "$reconfigure" = yes ]; then
     if grep -q '^NINJA_MONITOR_HEARTBEAT_URL=.' "$etc/env" 2>/dev/null; then
         sed -i '/^\[heartbeat\]/,/^\[/ s/^enabled = false/enabled = true/' "$etc/config.toml"
     fi
+    # Keep pushing on if it was set up before (the URL lives in the old config).
+    if [ -f "$etc/config.toml.bak" ]; then
+        old_url=$(awk -F'"' '/^\[/ { s = ($0 ~ /^\[push\]/) } s && /^url = / { print $2 }' "$etc/config.toml.bak")
+        if [ -n "$old_url" ]; then
+            printf '\n[push]\nenabled = true\nurl = "%s"\n' "$old_url" >> "$etc/config.toml"
+            echo "kept pushing to $old_url"
+        fi
+    fi
 else
     echo "kept existing $etc/config.toml"
 fi
@@ -166,6 +176,41 @@ if [ "$heartbeat" = yes ]; then
             ;;
         *) echo "install.sh: that does not look like a URL; nothing saved" >&2 ;;
     esac
+fi
+
+if [ "$push" = yes ]; then
+    printf 'ninja-ingest URL (for example https://ingest.example.net/v1/ingest): ' > /dev/tty
+    IFS= read -r url < /dev/tty || url=
+    url=$(printf '%s' "$url" | tr -d '[:space:]')
+    case $url in
+        https://* | http://*) ;;
+        *)
+            echo "install.sh: that does not look like a URL; nothing saved" >&2
+            url=
+            ;;
+    esac
+    if [ -n "$url" ]; then
+        prompt_secret "Agent token from install-ingest.sh --add-agent (input hidden): "
+        if [ -z "$secret" ]; then
+            echo "install.sh: no token given; nothing saved" >&2
+        else
+            set_env NINJA_MONITOR_PUSH_TOKEN "$secret"
+            if grep -q '^\[push\]' "$etc/config.toml"; then
+                URL=$url awk '
+                    /^\[/ { s = ($0 ~ /^\[push\]/) }
+                    s && /^enabled = / { print "enabled = true"; next }
+                    s && /^url = / { print "url = \"" ENVIRON["URL"] "\""; next }
+                    { print }
+                ' "$etc/config.toml" > "$etc/.config.new"
+                chown root:"$user" "$etc/.config.new"
+                chmod 0640 "$etc/.config.new"
+                mv -f "$etc/.config.new" "$etc/config.toml"
+            else
+                printf '\n[push]\nenabled = true\nurl = "%s"\n' "$url" >> "$etc/config.toml"
+            fi
+            echo "saved the token to $etc/env and enabled pushing to $url"
+        fi
+    fi
 fi
 
 # The unit is always refreshed; keep local changes in a drop-in

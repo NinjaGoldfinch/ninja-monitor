@@ -1,0 +1,55 @@
+# ninja-ingest configuration. Lives at /etc/ninja-ingest/config.toml.
+# Every key is optional except the [[agent]] blocks; the values shown are the
+# defaults. Durations are a whole number with a unit: ms, s, m, h or d.
+# Unknown keys are an error, so a typo cannot silently do nothing.
+
+[server]
+# cloudflared (or any reverse proxy) terminates TLS and forwards here.
+bind = "127.0.0.1:9091"
+# Must be true to bind anything other than a loopback address.
+allow_non_loopback = false
+# Browser origins allowed to read the API, for a frontend on another
+# hostname. Empty means no CORS headers at all. The ingest route never
+# gets them.
+cors_origins = []
+# cors_origins = ["https://ninjagoldfinch.com", "https://ninjagoldfinch.nz"]
+
+[storage]
+# systemd creates this directory (StateDirectory in the unit).
+path = "/var/lib/ninja-ingest/ingest.db"
+# Raw samples older than this are deleted, and samples older than this are
+# refused on arrival. About 155 MiB per host per 30 days with three services.
+retention = "30d"
+# Alert events raised by the agents.
+events_retention = "180d"
+
+[discord]
+# The webhook URL lives in /etc/ninja-ingest/env (sudo ./install-ingest.sh --webhook).
+enabled = false
+# Post STARTED at every start, so a restart loop is visible.
+startup_message = true
+
+[silence]
+# A host with no samples for this long is announced as SILENT, and as
+# REPORTING when samples return. Keep it at least the agent's push back-off
+# cap (60s) plus two sampling intervals, so a short blip stays quiet.
+after = "2m"
+# Remind while a host stays silent. Omit for no reminders.
+# repeat = "6h"
+
+[heartbeat]
+# GET a URL on a timer so an external checker (such as healthchecks.io)
+# notices if this server, or the whole network it sits on, goes away.
+# The URL lives in /etc/ninja-ingest/env (sudo ./install-ingest.sh --heartbeat).
+enabled = false
+url_env = "NINJA_INGEST_HEARTBEAT_URL"
+interval = "60s"
+
+# One block per agent. `name` must equal [host] name in that agent's config,
+# and `token_env` names the environment variable in /etc/ninja-ingest/env
+# that holds its bearer token. `sudo ./install-ingest.sh --add-agent <name>`
+# writes both and prints the token to carry to the agent.
+#
+# [[agent]]
+# name = "vps"
+# token_env = "NINJA_INGEST_TOKEN_VPS"

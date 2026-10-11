@@ -5,7 +5,9 @@
 A small Rust daemon that watches one Linux VPS. It samples CPU, memory and disk
 usage for the host and for each configured systemd service, keeps recent
 history in memory, serves it as JSON on localhost, sends alerts to a Discord
-webhook and can ping an external heartbeat checker.
+webhook and can ping an external heartbeat checker. Optionally it pushes
+everything to [ninja-ingest](ingest/README.md), a small central server in
+this repository that keeps weeks of history for several machines.
 
 It aims to be the lightest thing on the box:
 
@@ -23,6 +25,7 @@ It needs systemd and cgroup v2, which every current Ubuntu release uses.
 - [Reaching the API](#reaching-the-api)
 - [Configuration](#configuration)
 - [Alerts](#alerts)
+- [Pushing to a central server](#pushing-to-a-central-server)
 - [API reference](#api-reference)
 - [Permissions and hardening](#permissions-and-hardening)
 - [Development](#development)
@@ -125,6 +128,7 @@ All of these run on the server, from the extracted `ninja-monitor` directory.
 | Upgrade | Run the download commands above again, then `sudo ./install.sh --start` |
 | Change the webhook | `sudo ./install.sh --webhook --start` |
 | Turn on the heartbeat | `sudo ./install.sh --heartbeat --start` |
+| Push to a ninja-ingest server | `sudo ./install.sh --push --start` (asks for the URL and the token) |
 | Edit the config | `sudoedit /etc/ninja-monitor/config.toml && sudo ./install.sh --start` |
 | Re-detect services | `sudo ./install.sh --reconfigure --start` (the old config is kept as `config.toml.bak`) |
 | Check the setup | `sudo ./install.sh` (installs the same binary again, starts nothing) |
@@ -133,7 +137,8 @@ All of these run on the server, from the extracted `ninja-monitor` directory.
 
 `install.sh` is safe to run any number of times. It never overwrites the
 config or the env file unless you ask (`--reconfigure`, `--webhook`,
-`--heartbeat`), and it only starts or restarts the service with `--start`.
+`--heartbeat`, `--push`), and it only starts or restarts the service with
+`--start`.
 
 What it sets up:
 
@@ -166,6 +171,9 @@ sudo ./deploy/install.sh --webhook --start
 
 To upgrade: `git pull && cargo build --release && sudo ./deploy/install.sh --start`.
 Building needs up to about 900 MiB of free memory for a minute or two.
+The repository also holds the ninja-ingest server, and `cargo build --release`
+builds both; on a small box add `-p ninja-monitor` to build only the agent and
+skip compiling SQLite.
 
 #### Build memory
 
@@ -271,6 +279,12 @@ commented example.
 | `[heartbeat] enabled` | `false` | Send a GET to a URL on a timer. |
 | `[heartbeat] url_env` | `NINJA_MONITOR_HEARTBEAT_URL` | Environment variable holding the heartbeat URL. |
 | `[heartbeat] interval` | `60s` | Time between heartbeats. Failures are logged and otherwise ignored. |
+| `[push] enabled` | `false` | Push samples and alert events to a ninja-ingest server, see [below](#pushing-to-a-central-server). |
+| `[push] url` | required when enabled | The server's ingest URL. `https://`, or `http://` to a loopback address. |
+| `[push] token_env` | `NINJA_MONITOR_PUSH_TOKEN` | Environment variable holding the bearer token. Missing: a warning is logged and the daemon runs without pushing. |
+| `[push] flush_interval` | the sampling interval | Minimum time between pushes. |
+| `[push] buffer` | `1h` | How much to keep while the server is unreachable. Oldest samples go first when full. At most 10 000 samples. |
+| `[push] alert_after` | `10m` | Discord alert when no push has succeeded for this long. `0s` disables it. |
 | `[[alert]]` | none | Alert rules, see below. |
 
 Environment variables (set them in `/etc/ninja-monitor/env`, or let
@@ -280,6 +294,7 @@ Environment variables (set them in `/etc/ninja-monitor/env`, or let
 |---|---|
 | `NINJA_MONITOR_DISCORD_WEBHOOK` | Discord webhook URL. Secret. |
 | `NINJA_MONITOR_HEARTBEAT_URL` | Heartbeat URL (or whatever `url_env` names). Secret. |
+| `NINJA_MONITOR_PUSH_TOKEN` | Bearer token for the ninja-ingest server (or whatever `[push] token_env` names). Secret. |
 | `NINJA_MONITOR_LOG` | `error`, `warn`, `info` (default), `debug` or `trace`. |
 
 Secrets are only ever read from the environment. They are never written to
@@ -336,6 +351,42 @@ Delivery happens on its own queue (up to 100 messages, oldest dropped first),
 so a slow or failing Discord never delays sampling. Each message is retried up
 to 3 times with exponential backoff, and rate limits wait for Discord's
 `retry_after`. Messages never ping anyone.
+
+## Pushing to a central server
+
+The agent keeps a day of history in memory, on the very machine whose failure
+you most want to notice. [ninja-ingest](ingest/README.md) is a second small
+daemon, in this repository, that runs somewhere else and receives every
+sample and alert event from one or more agents, keeps them for 30 days in
+SQLite and serves them with the same API shapes plus a host dimension.
+
+On the server, `sudo ./install-ingest.sh --add-agent vps` prints a token.
+Then here:
+
+```sh
+sudo ./install.sh --push --start   # asks for the server's URL and the token
+```
+
+That writes the token to `/etc/ninja-monitor/env` and a `[push]` section to
+the config. From then on every sample is sent as it is taken. While the
+server is unreachable the agent buffers an hour of samples (oldest dropped
+first beyond that), retries with back-off of 15, 30 then 60 seconds, and
+after `alert_after` (10 minutes) posts to Discord:
+
+```text
+**FIRING** [vps] ingest unreachable: no successful push for 10m 5s (42 samples buffered)
+**RESOLVED** [vps] ingest unreachable: reachable again after 12m, 48 samples caught up
+```
+
+The server, for its part, posts `SILENT` when this agent stops reporting.
+Between the two, both directions are watched, so **once pushing is on, the
+agent's `[heartbeat]` is redundant** and can be turned off. It keeps working
+for anyone running the agent alone. `sudo ./install.sh` (the check step)
+confirms the token is set and the server's `/healthz` answers.
+
+Nothing else changes: the local API, history and alert rules stay as they
+are. The pusher is one more subscriber on the sample bus and can never slow
+sampling or alerting.
 
 ## API reference
 
@@ -482,17 +533,24 @@ macOS, plus shellcheck on the scripts
 2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
 
 [`release.yml`](.github/workflows/release.yml) then runs the checks again,
-builds static binaries natively on x86_64 and ARM runners, smoke-tests them,
-attests their provenance and publishes the release with `SHA256SUMS`. It
-refuses a tag that does not match the version in `Cargo.toml`.
+builds static binaries for both the agent and ninja-ingest natively on
+x86_64 and ARM runners, smoke-tests them, attests their provenance and
+publishes the release with `SHA256SUMS`. It refuses a tag that does not
+match the version in both `Cargo.toml` files; bump `ingest/Cargo.toml`
+together with the root one.
 
 ### Design
 
 One process, one broadcast channel. The sampler builds an immutable sample
-every tick and publishes it; the store, the alert engine and anything added
-later (such as a push to a remote server) are independent subscribers, so a
-slow consumer can never stall sampling. The disk walker runs on its own slow
-timer on a blocking thread and hands its results to the sampler.
+every tick and publishes it; the store, the alert engine and the pusher are
+independent subscribers, so a slow consumer can never stall sampling. The
+disk walker runs on its own slow timer on a blocking thread and hands its
+results to the sampler.
+
+The repository is a Cargo workspace: this crate at the root and the
+ninja-ingest server in [`ingest/`](ingest/), which depends on this one for
+the sample types (the wire format is the agent's own JSON) and the history
+code, so the two APIs stay identical by construction.
 
 ## License
 

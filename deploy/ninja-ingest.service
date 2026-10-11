@@ -1,0 +1,50 @@
+[Unit]
+Description=ninja-ingest central store for ninja-monitor agents
+Documentation=https://github.com/NinjaGoldfinch/ninja-monitor
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ninja-ingest
+Group=ninja-ingest
+ExecStart=/usr/local/bin/ninja-ingest --config /etc/ninja-ingest/config.toml
+EnvironmentFile=/etc/ninja-ingest/env
+# systemd creates /var/lib/ninja-ingest, owned by the service user, and is
+# the only place the daemon may write. The database lives there.
+StateDirectory=ninja-ingest
+StateDirectoryMode=0750
+Restart=on-failure
+RestartSec=5s
+MemoryMax=128M
+
+# The daemon listens on loopback (cloudflared or a reverse proxy sits in
+# front), reads and writes its state directory and makes outbound HTTPS
+# requests to Discord and a heartbeat checker. Nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

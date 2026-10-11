@@ -68,3 +68,11 @@ for = "15s"
 name = "riot-proxy OOM kill"
 scope = "service:riot-proxy"
 metric = "oom_kill"
+
+# To push to a local ninja-ingest (see ingest/README.md, Development):
+# [push]
+# enabled = true
+# url = "http://127.0.0.1:9091/v1/ingest"
+# flush_interval = "5s"
+# buffer = "10m"
+# alert_after = "1m"
