@@ -7,7 +7,7 @@ webhook and can ping an external heartbeat checker.
 
 It aims to be the lightest thing on the box:
 
-- One static 2.2 MiB binary, one process, a current-thread async runtime.
+- One small binary (about 2 MiB), one process, a current-thread async runtime.
 - About 2 MiB RSS at start and under 8 MiB with a full day of history
   (host, one mount and three services at 15 second samples).
 - Effectively no CPU between samples. Nothing is written to disk.
@@ -17,8 +17,7 @@ It needs systemd and cgroup v2, which every current Ubuntu release uses.
 ## Contents
 
 - [What the numbers mean](#what-the-numbers-mean)
-- [Building](#building)
-- [Installing](#installing)
+- [Setup](#setup)
 - [Reaching the API](#reaching-the-api)
 - [Configuration](#configuration)
 - [Alerts](#alerts)
@@ -76,82 +75,91 @@ Disk usage counts allocated blocks (like `du`), does not follow symlinks below
 a configured path, stays on one filesystem and counts hard-linked files once.
 Any missing or unreadable value is reported as `null`, never as 0.
 
-## Building
+## Setup
 
-Builds happen on your own machine; the server only receives a static binary.
-These steps cross-compile from macOS to `x86_64-unknown-linux-musl` with
-[cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild).
+Everything happens on the server, over SSH. Building there needs about
+800 MiB of free memory for a minute or two.
 
-One-time setup:
+```sh
+# 1. Tools: a C compiler (for TLS) and Rust
+sudo apt-get update && sudo apt-get install -y build-essential git curl
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+. "$HOME/.cargo/env"
+
+# 2. Get the code and build it
+git clone https://github.com/NinjaGoldfinch/ninja-monitor.git
+cd ninja-monitor
+cargo build --release
+
+# 3. Install, save the Discord webhook (asked for, not echoed) and start
+sudo ./deploy/install.sh --webhook --start
+```
+
+That's it. On first install, `install.sh` writes
+`/etc/ninja-monitor/config.toml` for you from the services that are running
+right now. It skips the operating system's own units (journald, cron, ssh and
+so on), and picks up each service's systemd `StateDirectory` as a data path.
+Every detected service gets three alert rules: anonymous memory above half the
+machine's RAM for 5 minutes, down for 1 minute, and any OOM kill. The host gets
+"memory available below 10%" and "disk above 85%".
+
+Before starting, it checks the whole setup as the service's own user, with
+your secrets loaded, and prints one `ok` or `WARN` line per item. It
+refuses to start if the config is invalid.
+
+### Everyday commands
+
+All of these run on the server, from the `ninja-monitor` checkout:
+
+| Task | Command |
+|---|---|
+| Upgrade | `git pull && cargo build --release && sudo ./deploy/install.sh --start` |
+| Change the webhook | `sudo ./deploy/install.sh --webhook --start` |
+| Turn on the heartbeat | `sudo ./deploy/install.sh --heartbeat --start` |
+| Edit the config | `sudoedit /etc/ninja-monitor/config.toml && sudo ./deploy/install.sh --start` |
+| Re-detect services | `sudo ./deploy/install.sh --reconfigure --start` (the old config is kept as `config.toml.bak`) |
+| Check the setup | `sudo ./deploy/install.sh` (installs nothing new, starts nothing) |
+| Status and logs | `systemctl status ninja-monitor` and `journalctl -u ninja-monitor -f` |
+| Remove it | `sudo ./deploy/install.sh --uninstall` (keeps `/etc/ninja-monitor`) |
+
+`install.sh` is safe to run any number of times. It never overwrites the
+config or the env file unless you ask (`--reconfigure`, `--webhook`,
+`--heartbeat`), and it only starts or restarts the service with `--start`.
+
+What it sets up:
+
+- a `ninja-monitor` system user (no login, no home),
+- the binary at `/usr/local/bin/ninja-monitor`,
+- `/etc/ninja-monitor/config.toml` (mode 0640, readable by the service user),
+- `/etc/ninja-monitor/env` for secrets (mode **0600**, root only; systemd reads
+  it before dropping privileges),
+- the systemd unit `ninja-monitor.service`.
+
+To watch a service that was not running at install time, or one the detection
+skipped, add a `[[service]]` block to the config (see
+[Configuration](#configuration)). `systemctl list-units --type=service
+--state=running` lists unit names, and `systemd-cgtop -1` shows which ones have
+a cgroup under `/system.slice/`.
+
+### Building somewhere else
+
+If you would rather not install Rust on the server, build a static binary
+elsewhere and pass its path to `install.sh`. From macOS, with
+[cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild):
 
 ```sh
 rustup target add x86_64-unknown-linux-musl
 brew install zig
 cargo install --locked cargo-zigbuild
-```
-
-Build:
-
-```sh
 cargo zigbuild --release --target x86_64-unknown-linux-musl
 ```
 
-The binary is `target/x86_64-unknown-linux-musl/release/ninja-monitor`. zig may
-print a harmless `ignoring deprecated linker optimization setting` warning.
-
-For an ARM server (`uname -m` prints `aarch64`) use the
-`aarch64-unknown-linux-musl` target instead. On Linux you can also run a plain
-`cargo build --release`.
-
-## Installing
-
-Copy the binary and the `deploy/` files to the server, then run the install
-script:
-
-```sh
-ssh <user>@<vps> 'mkdir -p /tmp/ninja-monitor'
-scp target/x86_64-unknown-linux-musl/release/ninja-monitor deploy/* <user>@<vps>:/tmp/ninja-monitor/
-ssh -t <user>@<vps> 'cd /tmp/ninja-monitor && sudo ./install.sh'
-```
-
-`install.sh` is safe to run again for upgrades. It:
-
-- creates a `ninja-monitor` system user (no login, no home),
-- installs the binary to `/usr/local/bin/ninja-monitor`,
-- installs `/etc/ninja-monitor/config.toml` (mode 0640) and
-  `/etc/ninja-monitor/env` (mode **0600**, root only) from the examples, but
-  never overwrites existing ones,
-- installs the systemd unit and runs `systemctl daemon-reload`.
-
-It does not enable or start the service. Then, on the server:
-
-1. Find your services' unit names:
-   ```sh
-   systemctl list-units --type=service --state=running
-   ```
-2. Edit `/etc/ninja-monitor/config.toml`. The unit names and paths in it are
-   placeholders.
-3. Check that the cgroups exist. Each running service appears as
-   `/system.slice/<unit>`:
-   ```sh
-   systemd-cgtop -1
-   ```
-4. Put the Discord webhook (and heartbeat URL, if used) in
-   `/etc/ninja-monitor/env`. Keep that file mode 0600.
-5. Ask ninja-monitor to check everything as its own user:
-   ```sh
-   sudo -u ninja-monitor /usr/local/bin/ninja-monitor --config /etc/ninja-monitor/config.toml --check
-   ```
-   Every line should start with `ok`. The webhook line will say WARN here
-   because the env file is only loaded by systemd.
-6. Start it and watch the log:
-   ```sh
-   sudo systemctl enable --now ninja-monitor
-   journalctl -u ninja-monitor -f
-   ```
-
-To upgrade, copy the new binary and run `install.sh` again, then
-`sudo systemctl restart ninja-monitor`.
+Copy `target/x86_64-unknown-linux-musl/release/ninja-monitor` and the `deploy/`
+directory to the server, then run
+`sudo ./deploy/install.sh --webhook --start path/to/ninja-monitor`. Use the
+`aarch64-unknown-linux-musl` target for an ARM server (`uname -m` prints
+`aarch64`). zig may print a harmless `ignoring deprecated linker optimization
+setting` warning.
 
 ## Reaching the API
 
@@ -170,7 +178,8 @@ curl -s localhost:9090/stats | python3 -m json.tool
 ## Configuration
 
 One TOML file, `/etc/ninja-monitor/config.toml` by default (change it with
-`--config <path>`). It is checked at startup and the daemon refuses to start
+`--config <path>`). `install.sh` generates it on first install;
+`ninja-monitor --init` prints a fresh one for the services running now. It is checked at startup and the daemon refuses to start
 with a clear message if anything is wrong, including unknown keys. Durations
 are whole numbers with a unit: `ms`, `s`, `m`, `h` or `d`.
 [`deploy/config.example.toml`](deploy/config.example.toml) is a full,
@@ -198,7 +207,8 @@ commented example.
 | `[heartbeat] interval` | `60s` | Time between heartbeats. Failures are logged and otherwise ignored. |
 | `[[alert]]` | none | Alert rules, see below. |
 
-Environment variables (set them in `/etc/ninja-monitor/env`):
+Environment variables (set them in `/etc/ninja-monitor/env`, or let
+`install.sh --webhook` / `--heartbeat` do it):
 
 | Variable | Meaning |
 |---|---|
@@ -345,7 +355,8 @@ Everything in `/proc` and `/sys/fs/cgroup` that ninja-monitor reads is
 world-readable, so host and service metrics need no extra rights. **Disk usage
 for a service's `paths` does**: the `ninja-monitor` user can only measure what
 it can read. Unreadable parts are skipped, the total becomes a lower bound and
-a warning is logged once per path. `--check` shows which paths are unreadable.
+a warning is logged once per path. Running `sudo ./deploy/install.sh` shows
+which paths are unreadable.
 
 To let it read a data directory, pick one:
 
