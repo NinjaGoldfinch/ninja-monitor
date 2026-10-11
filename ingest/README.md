@@ -37,7 +37,6 @@ listens on loopback. The agents only ever connect outward.
 VPS:  ninja-monitor --(HTTPS POST, bearer token)--> cloudflared --> ninja-ingest --> SQLite
                                                                           |
                                       frontend / curl  <-- GET /hosts ... +--> Discord (SILENT / REPORTING)
-                                                                          +--> heartbeat checker
 ```
 
 Each agent keeps its own day of history and its own alert rules; nothing
@@ -314,7 +313,9 @@ keep working.
 
 ## Who notices what
 
-Once an agent pushes here, its own `[heartbeat]` is redundant.
+The two sides watch each other, so neither needs an external heartbeat
+checker. The agent's own `[heartbeat]` can be turned off once it pushes
+here.
 
 | Failure | Noticed by | Message |
 |---|---|---|
@@ -322,8 +323,10 @@ Once an agent pushes here, its own `[heartbeat]` is redundant.
 | Agent crashed or stuck, VPS up | this server | `SILENT [vps]` |
 | This server, the node, cloudflared or the home internet down | the agent, after `alert_after` (10 minutes) | `FIRING [vps] ingest unreachable` |
 | Same, for longer than the agent's buffer | the agent; the gap shows in history | as above, plus an overflow warning in the agent's log |
-| Both sides down at once | an external checker, via `[heartbeat]` here | whatever the checker sends |
-| Discord down | nothing, until it is back; the queues retry | delayed messages |
+| Both sides down at once, or Discord down | nothing, until one is back; the queues retry | delayed messages |
+
+If you want that last row covered too, the optional `[heartbeat]` section
+pings an external checker from this server. It is off by default.
 
 Messages look like this:
 
