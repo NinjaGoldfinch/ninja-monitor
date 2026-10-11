@@ -2,11 +2,12 @@
 //! database, with a tiny HTTP/1.1 client that needs no extra crates.
 #![allow(dead_code)]
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener as StdListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -49,7 +50,14 @@ impl Server {
     pub fn start(extra: &str) -> Server {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("ingest.db");
-        Self::start_at(dir, db_path, "127.0.0.1:0", extra)
+        Self::start_at(dir, db_path, "127.0.0.1:0", extra, Outbound::default())
+    }
+
+    /// Starts with Discord and heartbeat URLs pointing at stubs.
+    pub fn start_with(extra: &str, outbound: Outbound) -> Server {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("ingest.db");
+        Self::start_at(dir, db_path, "127.0.0.1:0", extra, outbound)
     }
 
     /// Starts again on an existing database file, as a restart would.
@@ -57,7 +65,15 @@ impl Server {
         self.shutdown();
         let dir = std::mem::replace(&mut self.dir, TempDir::new().unwrap());
         let db_path = self.db_path.clone();
-        Self::start_at(dir, db_path, "127.0.0.1:0", extra)
+        Self::start_at(dir, db_path, "127.0.0.1:0", extra, Outbound::default())
+    }
+
+    /// Restarts on the same database with new outbound URLs.
+    pub fn restart_with(mut self, extra: &str, outbound: Outbound) -> Server {
+        self.shutdown();
+        let dir = std::mem::replace(&mut self.dir, TempDir::new().unwrap());
+        let db_path = self.db_path.clone();
+        Self::start_at(dir, db_path, "127.0.0.1:0", extra, outbound)
     }
 
     /// Like `restart`, but on the same address, so a client that already
@@ -66,15 +82,21 @@ impl Server {
         self.shutdown();
         let dir = std::mem::replace(&mut self.dir, TempDir::new().unwrap());
         let (db_path, base) = (self.db_path.clone(), self.base.clone());
-        Self::start_at(dir, db_path, &base, extra)
+        Self::start_at(dir, db_path, &base, extra, Outbound::default())
     }
 
     /// Starts on an existing database in `dir`.
     pub fn start_on(dir: TempDir, db_path: PathBuf, extra: &str) -> Server {
-        Self::start_at(dir, db_path, "127.0.0.1:0", extra)
+        Self::start_at(dir, db_path, "127.0.0.1:0", extra, Outbound::default())
     }
 
-    fn start_at(dir: TempDir, db_path: PathBuf, bind: &str, extra: &str) -> Server {
+    fn start_at(
+        dir: TempDir,
+        db_path: PathBuf,
+        bind: &str,
+        extra: &str,
+        outbound: Outbound,
+    ) -> Server {
         // `extra` uses dotted keys (`silence.after = "1m"`) so it can set any
         // section without clashing with the ones written here.
         let config = Config::parse(&format!(
@@ -97,7 +119,8 @@ impl Server {
                 ("vps".into(), TOKEN_VPS.into()),
                 ("home".into(), TOKEN_HOME.into()),
             ],
-            ..Secrets::default()
+            discord_webhook: outbound.discord,
+            heartbeat_url: outbound.heartbeat,
         };
         let db = Db::open(&db_path).unwrap();
 
@@ -243,6 +266,110 @@ pub fn request(
         headers,
         body,
     }
+}
+
+/// Where the server's own outbound requests go in a test.
+#[derive(Default)]
+pub struct Outbound {
+    pub discord: Option<String>,
+    pub heartbeat: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Received {
+    pub method: String,
+    pub path: String,
+    pub body: String,
+}
+
+/// Minimal HTTP/1.1 server standing in for Discord or a heartbeat checker.
+/// Answers `204 No Content` and records what it received.
+pub struct Stub {
+    pub url: String,
+    requests: Arc<Mutex<Vec<Received>>>,
+}
+
+impl Stub {
+    pub fn start() -> Stub {
+        let listener = StdListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let Some(received) = read_request(&mut stream) else {
+                    continue;
+                };
+                recorded.lock().unwrap().push(received);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                );
+            }
+        });
+        Stub { url, requests }
+    }
+
+    pub fn requests(&self) -> Vec<Received> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    /// Discord message texts received so far.
+    pub fn contents(&self) -> Vec<String> {
+        self.requests()
+            .iter()
+            .filter_map(|r| serde_json::from_str::<Value>(&r.body).ok())
+            .filter_map(|v| v["content"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    pub fn wait_for_content(&self, needle: &str) -> String {
+        wait_until(&format!("a message containing {needle:?}"), || {
+            self.contents().into_iter().find(|c| c.contains(needle))
+        })
+    }
+}
+
+fn read_request(stream: &mut TcpStream) -> Option<Received> {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    let mut parts = line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let path = parts.next()?.to_string();
+    let mut length = 0;
+    loop {
+        let mut header = String::new();
+        reader.read_line(&mut header).ok()?;
+        let header = header.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse().ok()?;
+        }
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).ok()?;
+    Some(Received {
+        method,
+        path,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    })
+}
+
+/// Polls `check` until it returns `Some`, failing after 10 seconds.
+pub fn wait_until<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if let Some(value) = check() {
+            return value;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {what}");
 }
 
 impl Drop for Server {

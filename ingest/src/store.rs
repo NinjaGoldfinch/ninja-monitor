@@ -69,6 +69,72 @@ pub fn host_by_name(conn: &Connection, name: &str) -> rusqlite::Result<Option<Ho
         .optional()
 }
 
+pub fn set_silent_since(
+    conn: &Connection,
+    host_id: i64,
+    value: Option<u64>,
+) -> rusqlite::Result<()> {
+    conn.prepare_cached("UPDATE host SET silent_since = ?2 WHERE id = ?1")?
+        .execute(params![host_id, i(value)])?;
+    Ok(())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Swept {
+    pub samples: usize,
+    pub events: usize,
+}
+
+/// Deletes rows older than the retention windows, at most `batch` per
+/// statement, until nothing old is left. Returns how many rows went.
+pub fn sweep(
+    conn: &Connection,
+    now: u64,
+    retention_ms: u64,
+    events_retention_ms: u64,
+    batch: usize,
+    pause: impl Fn(),
+) -> rusqlite::Result<Swept> {
+    let mut out = Swept::default();
+    let samples_before = clamp(now.saturating_sub(retention_ms));
+    let events_before = clamp(now.saturating_sub(events_retention_ms));
+    for table in ["host_sample", "disk_sample", "service_sample"] {
+        out.samples += delete_old(conn, table, samples_before, batch, &pause)?;
+    }
+    out.events += delete_old(conn, "alert_event", events_before, batch, &pause)?;
+    Ok(out)
+}
+
+fn delete_old(
+    conn: &Connection,
+    table: &str,
+    before: i64,
+    batch: usize,
+    pause: &impl Fn(),
+) -> rusqlite::Result<usize> {
+    // Tables are WITHOUT ROWID, so delete by key range through a subquery.
+    let sql = format!(
+        "DELETE FROM {table} WHERE (host_id, ts) IN
+         (SELECT host_id, ts FROM {table} WHERE ts < ?1 LIMIT ?2)"
+    );
+    let mut total = 0;
+    loop {
+        let deleted = conn
+            .prepare_cached(&sql)?
+            .execute(params![before, batch as i64])?;
+        total += deleted;
+        if deleted < batch {
+            return Ok(total);
+        }
+        pause();
+    }
+}
+
+/// Hands WAL pages back to the main file after a sweep.
+pub fn checkpoint(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+}
+
 /// Stores one request in one transaction. Samples already present (same
 /// host and timestamp) are counted as duplicates and left untouched.
 pub fn insert_batch(
@@ -601,5 +667,86 @@ mod tests {
         let host = db.call_sync(|c| host_by_name(c, "vps")).unwrap().unwrap();
         assert_eq!(host.agent.as_deref(), Some("x/1"));
         assert_eq!(host.last_seen, 2);
+    }
+
+    #[test]
+    fn silent_since_round_trips() {
+        let db = Db::in_memory().unwrap();
+        db.call_sync(|c| insert_batch(c, "vps", None, 1, &[sample(1, None, None)], &[]))
+            .unwrap();
+        let host = db.call_sync(|c| host_by_name(c, "vps")).unwrap().unwrap();
+        assert_eq!(host.silent_since, None);
+        db.call_sync(|c| set_silent_since(c, host.id, Some(42)))
+            .unwrap();
+        assert_eq!(
+            db.call_sync(|c| host_by_name(c, "vps"))
+                .unwrap()
+                .unwrap()
+                .silent_since,
+            Some(42)
+        );
+        db.call_sync(|c| set_silent_since(c, host.id, None))
+            .unwrap();
+        assert_eq!(
+            db.call_sync(|c| host_by_name(c, "vps"))
+                .unwrap()
+                .unwrap()
+                .silent_since,
+            None
+        );
+    }
+
+    #[test]
+    fn sweep_removes_only_old_rows_in_batches() {
+        let db = Db::in_memory().unwrap();
+        let samples: Vec<Sample> = (1..=10)
+            .map(|t| sample(t * 1000, Some(1.0), Some(1)))
+            .collect();
+        let evs: Vec<AlertEvent> = (1..=10).map(|t| event(t * 1000, "r")).collect();
+        db.call_sync(|c| insert_batch(c, "vps", None, 20_000, &samples, &evs))
+            .unwrap();
+        let host = db.call_sync(|c| host_by_name(c, "vps")).unwrap().unwrap();
+
+        // Samples older than 5s, events older than 8s, at 3 rows per statement.
+        let pauses = std::cell::Cell::new(0);
+        let swept = db
+            .call_sync(|c| sweep(c, 10_000, 5_000, 8_000, 3, || pauses.set(pauses.get() + 1)))
+            .unwrap();
+        // ts 1000..=4000 go: 4 rows in each of three sample tables.
+        assert_eq!(
+            swept,
+            Swept {
+                samples: 12,
+                events: 1
+            }
+        );
+        assert!(pauses.get() >= 3, "{}", pauses.get());
+
+        let (points, disks) = db
+            .call_sync(|c| host_points(c, host.id, 0, u64::MAX))
+            .unwrap();
+        assert_eq!(
+            points.iter().map(|p| p.t).collect::<Vec<_>>(),
+            [5000, 6000, 7000, 8000, 9000, 10_000]
+        );
+        assert_eq!(disks[0].1.len(), 6);
+        assert_eq!(
+            db.call_sync(|c| service_points(c, host.id, "riot-proxy", 0, u64::MAX))
+                .unwrap()
+                .len(),
+            6
+        );
+        assert_eq!(db.call_sync(|c| events(c, host.id, 100)).unwrap().len(), 9);
+        assert!(
+            db.call_sync(|c| host_by_name(c, "vps")).unwrap().is_some(),
+            "host rows stay"
+        );
+
+        // Nothing old left: a second sweep is a no-op.
+        let again = db
+            .call_sync(|c| sweep(c, 10_000, 5_000, 8_000, 3, || {}))
+            .unwrap();
+        assert_eq!(again, Swept::default());
+        db.call_sync(|c| checkpoint(c)).unwrap();
     }
 }
