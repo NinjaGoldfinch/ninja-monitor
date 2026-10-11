@@ -24,6 +24,7 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE host_sample (
         host_id INTEGER NOT NULL REFERENCES host(id),
         ts      INTEGER NOT NULL,
+        received_at INTEGER NOT NULL,
         cpu_percent REAL, cores INTEGER, load1 REAL, load5 REAL, load15 REAL,
         mem_total_bytes INTEGER, mem_available_bytes INTEGER, mem_used_bytes INTEGER,
         mem_cache_bytes INTEGER, swap_total_bytes INTEGER, swap_used_bytes INTEGER,
@@ -35,6 +36,7 @@ const MIGRATIONS: &[&str] = &[
         host_id INTEGER NOT NULL REFERENCES host(id),
         ts      INTEGER NOT NULL,
         mount   TEXT NOT NULL,
+        pos     INTEGER NOT NULL,
         total_bytes INTEGER, used_bytes INTEGER, avail_bytes INTEGER, used_percent REAL,
         PRIMARY KEY (host_id, mount, ts)
     ) WITHOUT ROWID;
@@ -43,6 +45,7 @@ const MIGRATIONS: &[&str] = &[
         host_id INTEGER NOT NULL REFERENCES host(id),
         ts      INTEGER NOT NULL,
         service TEXT NOT NULL,
+        pos     INTEGER NOT NULL,
         unit    TEXT,
         up      INTEGER NOT NULL,
         cpu_percent REAL, mem_current_bytes INTEGER, mem_anon_bytes INTEGER,

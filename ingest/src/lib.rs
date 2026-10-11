@@ -5,9 +5,12 @@ pub mod api;
 pub mod check;
 pub mod config;
 pub mod db;
+pub mod ingest;
+pub mod store;
 pub mod token;
 
 use std::future::Future;
+use std::sync::Arc;
 
 use anyhow::Context;
 use tokio::net::TcpListener;
@@ -37,7 +40,7 @@ pub async fn run(
         }
     }
 
-    let state = api::AppState::new(db);
+    let state = api::AppState::new(db, Arc::new(config), Arc::new(secrets));
     axum::serve(listener, api::router(state))
         .with_graceful_shutdown(shutdown)
         .await
