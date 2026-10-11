@@ -7,6 +7,7 @@ pub mod config;
 pub mod heartbeat;
 pub mod history;
 pub mod init;
+pub mod push;
 pub mod sample;
 pub mod sampler;
 pub mod store;
@@ -28,6 +29,8 @@ use crate::store::Store;
 
 /// Samples waiting for the slowest subscriber before it starts losing them.
 const BUS_CAPACITY: usize = 16;
+/// Alert events waiting for the pusher.
+const EVENT_BUS_CAPACITY: usize = 100;
 
 /// Wires the sampler, bus and subscribers together and serves the API until
 /// `shutdown` resolves.
@@ -68,11 +71,47 @@ pub async fn run(
     };
 
     // Subscribe before the sampler starts so the first sample is not missed.
+    let (events_tx, _) = broadcast::channel(EVENT_BUS_CAPACITY);
     tasks.push(tokio::spawn(store::run(store.clone(), bus.subscribe())));
+
+    let (stop_push, pusher) = match (&secrets.push_token, config.push.enabled) {
+        (Some(token), true) => {
+            let url = config.push.url.clone().unwrap_or_default();
+            info!(
+                buffer = config.push.capacity(config.sampling.interval),
+                "push enabled"
+            );
+            let pusher = push::Pusher {
+                state: push::State::new(&config.host.name, &config.push, config.sampling.interval),
+                agent: agent.clone(),
+                url,
+                token: token.clone(),
+                queue: queue.clone(),
+            };
+            let (stop_tx, stop_rx) = watch::channel(false);
+            let handle = tokio::spawn(push::run(
+                pusher,
+                bus.subscribe(),
+                events_tx.subscribe(),
+                stop_rx,
+            ));
+            (Some(stop_tx), Some(handle))
+        }
+        (None, true) => {
+            warn!(
+                "push.enabled is true but {} is not set; running without pushing",
+                config.push.token_env
+            );
+            (None, None)
+        }
+        (_, false) => (None, None),
+    };
+
     tasks.push(tokio::spawn(alerts::run(
         engine.clone(),
         bus.subscribe(),
         queue,
+        events_tx,
         config.host.name.clone(),
     )));
 
@@ -121,6 +160,14 @@ pub async fn run(
     stop_walks.store(true, Ordering::Relaxed);
     for task in tasks {
         task.abort();
+    }
+    // Give the pusher one bounded chance to send what it still holds.
+    if let (Some(stop), Some(handle)) = (stop_push, pusher) {
+        let _ = stop.send(true);
+        let grace = push::SHUTDOWN_FLUSH + std::time::Duration::from_millis(500);
+        if tokio::time::timeout(grace, handle).await.is_err() {
+            warn!("pusher did not finish its final flush in time");
+        }
     }
     result
 }

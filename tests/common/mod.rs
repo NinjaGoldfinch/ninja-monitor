@@ -190,7 +190,17 @@ pub fn wait_until<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
 pub struct Request {
     pub method: String,
     pub path: String,
+    pub headers: Vec<(String, String)>,
     pub body: String,
+}
+
+impl Request {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
 }
 
 /// Minimal HTTP/1.1 server standing in for Discord or a heartbeat checker.
@@ -203,7 +213,13 @@ pub struct Stub {
 
 impl Stub {
     pub fn start() -> Stub {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        Self::start_at("127.0.0.1:0")
+    }
+
+    /// Binds a specific address, to stand up a server on a port a client
+    /// already knows about.
+    pub fn start_at(addr: &str) -> Stub {
+        let listener = TcpListener::bind(addr).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let replies = Arc::new(Mutex::new(VecDeque::new()));
@@ -269,6 +285,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
     let method = parts.next()?.to_string();
     let path = parts.next()?.to_string();
     let mut length = 0;
+    let mut headers = Vec::new();
     loop {
         let mut header = String::new();
         reader.read_line(&mut header).ok()?;
@@ -276,10 +293,11 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
         if header.is_empty() {
             break;
         }
-        if let Some((name, value)) = header.split_once(':')
-            && name.eq_ignore_ascii_case("content-length")
-        {
-            length = value.trim().parse().ok()?;
+        if let Some((name, value)) = header.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse().ok()?;
+            }
+            headers.push((name.to_string(), value.trim().to_string()));
         }
     }
     let mut body = vec![0; length];
@@ -287,6 +305,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
     Some(Request {
         method,
         path,
+        headers,
         body: String::from_utf8_lossy(&body).into_owned(),
     })
 }

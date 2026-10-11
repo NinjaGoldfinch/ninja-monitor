@@ -28,6 +28,8 @@ pub struct Config {
     pub discord: DiscordConfig,
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
+    #[serde(default)]
+    pub push: PushConfig,
     #[serde(default, rename = "alert")]
     pub alerts: Vec<AlertRule>,
 }
@@ -155,6 +157,95 @@ impl Default for HeartbeatConfig {
             interval: Duration::from_secs(60),
         }
     }
+}
+
+/// Pushing samples to a ninja-ingest server.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PushConfig {
+    pub enabled: bool,
+    /// The server's ingest URL. `https://`, or `http://` to a loopback address.
+    pub url: Option<String>,
+    pub token_env: String,
+    /// Minimum time between POSTs. Defaults to the sampling interval.
+    #[serde(deserialize_with = "de_opt_duration")]
+    pub flush_interval: Option<Duration>,
+    /// How much to keep while the server is unreachable.
+    #[serde(deserialize_with = "de_duration")]
+    pub buffer: Duration,
+    /// Discord alert after this long without a successful push; `0s` disables it.
+    #[serde(deserialize_with = "de_duration")]
+    pub alert_after: Duration,
+}
+
+impl Default for PushConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: None,
+            token_env: PUSH_TOKEN_ENV.to_string(),
+            flush_interval: None,
+            buffer: Duration::from_secs(3600),
+            alert_after: Duration::from_secs(600),
+        }
+    }
+}
+
+/// Most samples the push buffer may hold, whatever `buffer` says.
+pub const MAX_PUSH_BUFFER: usize = 10_000;
+
+impl PushConfig {
+    pub fn flush_interval(&self, sampling_interval: Duration) -> Duration {
+        self.flush_interval.unwrap_or(sampling_interval)
+    }
+
+    /// Buffer length in samples.
+    pub fn capacity(&self, sampling_interval: Duration) -> usize {
+        let interval = sampling_interval.as_millis().max(1);
+        (self.buffer.as_millis() / interval).max(1) as usize
+    }
+}
+
+/// Accepts `https://host[:port]/path` or `http://` to a loopback host only.
+pub fn check_push_url(url: &str) -> Result<(), String> {
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or_else(|| "must start with https:// or http://".to_string())?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // `[::1]:9091`, `host:9091` or `host`.
+    let host = match authority.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or(""),
+        None => authority
+            .rsplit_once(':')
+            .filter(|(_, port)| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
+            .map_or(authority, |(h, _)| h),
+    };
+    if host.is_empty() || host.contains(char::is_whitespace) || host.contains('@') {
+        return Err("has no valid host".to_string());
+    }
+    match scheme {
+        "https" => Ok(()),
+        "http" => {
+            let loopback = host == "localhost"
+                || host == "::1"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback());
+            if loopback {
+                Ok(())
+            } else {
+                Err("plain http is only allowed to a loopback address".to_string())
+            }
+        }
+        _ => Err("must start with https:// or http://".to_string()),
+    }
+}
+
+/// Scheme and authority of a URL, for a `/healthz` probe next to it.
+pub fn url_origin(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    Some(format!("{scheme}://{authority}"))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -306,12 +397,14 @@ impl Op {
 }
 
 pub const DISCORD_WEBHOOK_ENV: &str = "NINJA_MONITOR_DISCORD_WEBHOOK";
+pub const PUSH_TOKEN_ENV: &str = "NINJA_MONITOR_PUSH_TOKEN";
 
-/// URLs that must never appear in config, logs or API responses.
+/// Values that must never appear in config, logs or API responses.
 #[derive(Clone, Default)]
 pub struct Secrets {
     pub discord_webhook: Option<String>,
     pub heartbeat_url: Option<String>,
+    pub push_token: Option<String>,
 }
 
 impl Secrets {
@@ -329,6 +422,11 @@ impl Secrets {
                 .enabled
                 .then(|| read(&config.heartbeat.url_env))
                 .flatten(),
+            push_token: config
+                .push
+                .enabled
+                .then(|| read(&config.push.token_env))
+                .flatten(),
         }
     }
 }
@@ -339,6 +437,7 @@ impl fmt::Debug for Secrets {
         f.debug_struct("Secrets")
             .field("discord_webhook", &set(&self.discord_webhook))
             .field("heartbeat_url", &set(&self.heartbeat_url))
+            .field("push_token", &set(&self.push_token))
             .finish()
     }
 }
@@ -414,6 +513,32 @@ impl Config {
             }
             if self.heartbeat.interval.is_zero() {
                 errors.push("heartbeat.interval must be greater than zero".to_string());
+            }
+        }
+
+        if self.push.enabled {
+            match &self.push.url {
+                None => errors.push("push.url is required when push.enabled is true".to_string()),
+                Some(url) => {
+                    if let Err(reason) = check_push_url(url) {
+                        errors.push(format!("push.url `{url}` {reason}"));
+                    }
+                }
+            }
+            if self.push.token_env.is_empty() {
+                errors.push("push.token_env must not be empty".to_string());
+            }
+            let flush = self.push.flush_interval(sampling.interval);
+            if flush.is_zero() {
+                errors.push("push.flush_interval must be greater than zero".to_string());
+            }
+            if self.push.buffer < flush {
+                errors.push("push.buffer must be at least push.flush_interval".to_string());
+            }
+            if self.push.capacity(sampling.interval) > MAX_PUSH_BUFFER {
+                errors.push(format!(
+                    "push.buffer holds more than {MAX_PUSH_BUFFER} samples at this sampling interval; shorten it"
+                ));
             }
         }
 
@@ -768,9 +893,11 @@ mod tests {
         let secrets = Secrets {
             discord_webhook: Some("https://discord.com/api/webhooks/1/secret".into()),
             heartbeat_url: None,
+            push_token: Some("secret-token".into()),
         };
         let text = format!("{secrets:?}");
         assert!(!text.contains("discord.com") && !text.contains("webhooks"));
+        assert!(!text.contains("secret-token"));
         assert!(text.contains("<set>"));
         assert!(text.contains("<unset>"));
     }
@@ -791,5 +918,69 @@ mod tests {
             Config::load(Path::new("/definitely/not/here.toml")).unwrap_err()
         );
         assert!(msg.contains("cannot read config file"), "{msg}");
+    }
+
+    #[test]
+    fn push_section() {
+        let config = Config::parse(
+            r#"
+            [sampling]
+            interval = "15s"
+            [push]
+            enabled = true
+            url = "https://ingest.example.net/v1/ingest"
+            buffer = "30m"
+            alert_after = "5m"
+            "#,
+        )
+        .unwrap();
+        assert!(config.push.enabled);
+        assert_eq!(config.push.token_env, PUSH_TOKEN_ENV);
+        assert_eq!(
+            config.push.flush_interval(config.sampling.interval),
+            Duration::from_secs(15)
+        );
+        assert_eq!(config.push.capacity(config.sampling.interval), 120);
+        assert_eq!(config.push.alert_after, Duration::from_secs(300));
+
+        let off = Config::parse("").unwrap();
+        assert!(!off.push.enabled);
+        assert_eq!(off.push.buffer, Duration::from_secs(3600));
+        assert_eq!(off.push.alert_after, Duration::from_secs(600));
+        // A disabled section is not validated beyond its syntax.
+        assert!(Config::parse("[push]\nurl = \"ftp://x\"").is_ok());
+
+        let err = |extra: &str| {
+            Config::parse(&format!("[push]\nenabled = true\n{extra}"))
+                .err()
+                .map(|e| format!("{e:#}"))
+                .unwrap_or_else(|| panic!("expected an error for {extra}"))
+        };
+        assert!(err("").contains("push.url is required"));
+        assert!(err("url = \"http://ingest.example.net/v1/ingest\"").contains("loopback"));
+        assert!(err("url = \"ftp://x/\"").contains("https"));
+        assert!(err("url = \"https:///v1\"").contains("host"));
+        assert!(err("url = \"https://x/\"\ntoken_env = \"\"").contains("token_env"));
+        assert!(
+            err("url = \"https://x/\"\nbuffer = \"5s\"").contains("at least push.flush_interval")
+        );
+        assert!(err("url = \"https://x/\"\nflush_interval = \"0s\"").contains("greater than zero"));
+        assert!(err("url = \"https://x/\"\nbuffer = \"7d\"").contains("10000"));
+
+        for ok in [
+            "http://localhost:9091/v1/ingest",
+            "http://127.0.0.1:9091/v1/ingest",
+            "http://[::1]:9091/v1/ingest",
+            "https://ingest.example.net/v1/ingest",
+            "https://ingest.example.net:8443/v1/ingest?x=1",
+        ] {
+            assert!(check_push_url(ok).is_ok(), "{ok}");
+        }
+        assert!(check_push_url("http://user@localhost/").is_err());
+        assert_eq!(
+            url_origin("https://ingest.example.net:8443/v1/ingest?x=1").as_deref(),
+            Some("https://ingest.example.net:8443")
+        );
+        assert_eq!(url_origin("nope"), None);
     }
 }

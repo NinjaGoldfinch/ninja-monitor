@@ -226,6 +226,13 @@ pub fn render(host_name: &str, services: &[Detected], memory_threshold: u64) -> 
          url_env = \"NINJA_MONITOR_HEARTBEAT_URL\"\n\
          interval = \"60s\"\n\
          \n\
+         # To push samples to a ninja-ingest server (sudo ./install.sh --push):\n\
+         # [push]\n\
+         # enabled = true\n\
+         # url = \"https://ingest.example.net/v1/ingest\"\n\
+         # buffer = \"1h\"           # kept while the server is unreachable\n\
+         # alert_after = \"10m\"     # Discord alert when pushes keep failing\n\
+         \n\
          [[alert]]\n\
          name = \"host memory low\"\n\
          scope = \"host\"\n\

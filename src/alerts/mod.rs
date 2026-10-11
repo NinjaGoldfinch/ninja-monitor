@@ -283,10 +283,13 @@ fn metric_value(rule: &AlertRule, sample: &Sample, service: Option<&ServiceSampl
 }
 
 /// Bus subscriber: evaluates rules and queues notifications.
+/// `events_tx` carries every event to whoever is listening (the pusher);
+/// sending to nobody is fine.
 pub async fn run(
     engine: Arc<Mutex<Engine>>,
     mut rx: broadcast::Receiver<Arc<Sample>>,
     queue: Option<Arc<Queue>>,
+    events_tx: broadcast::Sender<AlertEvent>,
     host_name: String,
 ) {
     let start = Instant::now();
@@ -309,6 +312,7 @@ pub async fn run(
             if let Some(queue) = &queue {
                 queue.push(notify::format_event(&host_name, &event));
             }
+            let _ = events_tx.send(event);
         }
     }
 }

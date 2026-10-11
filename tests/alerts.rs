@@ -37,7 +37,7 @@ const RULES: &str = r#"
 fn discord_secrets(stub: &Stub) -> Secrets {
     Secrets {
         discord_webhook: Some(format!("{}/api/webhooks/1/token", stub.url)),
-        heartbeat_url: None,
+        ..Secrets::default()
     }
 }
 
@@ -157,8 +157,8 @@ fn alerts_endpoint_without_rules() {
 fn heartbeat_pings_on_interval() {
     let stub = Stub::start();
     let secrets = Secrets {
-        discord_webhook: None,
         heartbeat_url: Some(format!("{}/ping/abc", stub.url)),
+        ..Secrets::default()
     };
     let extra = "[heartbeat]\nenabled = true\ninterval = \"100ms\"";
     let _app = App::start_full("1h", "1h", extra, secrets);
@@ -177,8 +177,8 @@ fn heartbeat_survives_failures() {
     stub.reply_next(500, "");
     stub.reply_next(503, "");
     let secrets = Secrets {
-        discord_webhook: None,
         heartbeat_url: Some(format!("{}/ping", stub.url)),
+        ..Secrets::default()
     };
     let extra = "[heartbeat]\nenabled = true\ninterval = \"100ms\"";
     let _app = App::start_full("1h", "1h", extra, secrets);

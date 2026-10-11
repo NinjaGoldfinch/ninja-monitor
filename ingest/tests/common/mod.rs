@@ -49,7 +49,7 @@ impl Server {
     pub fn start(extra: &str) -> Server {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("ingest.db");
-        Self::start_at(dir, db_path, extra)
+        Self::start_at(dir, db_path, "127.0.0.1:0", extra)
     }
 
     /// Starts again on an existing database file, as a restart would.
@@ -57,20 +57,29 @@ impl Server {
         self.shutdown();
         let dir = std::mem::replace(&mut self.dir, TempDir::new().unwrap());
         let db_path = self.db_path.clone();
-        Self::start_at(dir, db_path, extra)
+        Self::start_at(dir, db_path, "127.0.0.1:0", extra)
+    }
+
+    /// Like `restart`, but on the same address, so a client that already
+    /// knows the port can find the server again.
+    pub fn restart_same_port(mut self, extra: &str) -> Server {
+        self.shutdown();
+        let dir = std::mem::replace(&mut self.dir, TempDir::new().unwrap());
+        let (db_path, base) = (self.db_path.clone(), self.base.clone());
+        Self::start_at(dir, db_path, &base, extra)
     }
 
     /// Starts on an existing database in `dir`.
     pub fn start_on(dir: TempDir, db_path: PathBuf, extra: &str) -> Server {
-        Self::start_at(dir, db_path, extra)
+        Self::start_at(dir, db_path, "127.0.0.1:0", extra)
     }
 
-    fn start_at(dir: TempDir, db_path: PathBuf, extra: &str) -> Server {
+    fn start_at(dir: TempDir, db_path: PathBuf, bind: &str, extra: &str) -> Server {
         // `extra` uses dotted keys (`silence.after = "1m"`) so it can set any
         // section without clashing with the ones written here.
         let config = Config::parse(&format!(
             r#"
-            server.bind = "127.0.0.1:0"
+            server.bind = "{bind}"
             storage.path = "{}"
             {extra}
             [[agent]]
@@ -136,57 +145,7 @@ impl Server {
         headers: &[(&str, &str)],
         body: Option<&Value>,
     ) -> Response {
-        let mut stream = TcpStream::connect(&self.base).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        let payload = body.map(|b| b.to_string()).unwrap_or_default();
-        let mut request = format!(
-            "{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
-            self.base
-        );
-        for (name, value) in headers {
-            request.push_str(&format!("{name}: {value}\r\n"));
-        }
-        if body.is_some() {
-            request.push_str(&format!(
-                "Content-Type: application/json\r\nContent-Length: {}\r\n",
-                payload.len()
-            ));
-        }
-        request.push_str("\r\n");
-        stream.write_all(request.as_bytes()).unwrap();
-        // A server that rejects on the headers alone may close before the
-        // body is written; the response is still worth reading.
-        let _ = stream.write_all(payload.as_bytes());
-
-        let mut raw = Vec::new();
-        let _ = stream.read_to_end(&mut raw);
-        let raw = String::from_utf8(raw).unwrap();
-        let (head, body) = raw.split_once("\r\n\r\n").expect("http response");
-        let mut lines = head.lines();
-        let status: u16 = lines
-            .next()
-            .unwrap()
-            .split_whitespace()
-            .nth(1)
-            .unwrap()
-            .parse()
-            .unwrap();
-        let headers = lines
-            .filter_map(|l| l.split_once(": "))
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        let body = if body.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_str(body).unwrap_or_else(|_| Value::String(body.to_string()))
-        };
-        Response {
-            status,
-            headers,
-            body,
-        }
+        request(&self.base, method, path, headers, body)
     }
 
     pub fn get(&self, path: &str) -> (u16, Value) {
@@ -219,6 +178,70 @@ impl Server {
         let (status, body) = self.post(Some(token), &body);
         assert_eq!(status, 200, "{body}");
         body
+    }
+}
+
+/// GET against any local HTTP server, such as the agent in the end-to-end test.
+pub fn get_json(base: &str, path: &str) -> (u16, Value) {
+    let r = request(base, "GET", path, &[], None);
+    (r.status, r.body)
+}
+
+/// Minimal HTTP/1.1 client: one request per connection, JSON bodies.
+pub fn request(
+    base: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<&Value>,
+) -> Response {
+    let mut stream = TcpStream::connect(base).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let payload = body.map(|b| b.to_string()).unwrap_or_default();
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {base}\r\nConnection: close\r\n");
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    if body.is_some() {
+        request.push_str(&format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            payload.len()
+        ));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).unwrap();
+    // A server that rejects on the headers alone may close before the
+    // body is written; the response is still worth reading.
+    let _ = stream.write_all(payload.as_bytes());
+
+    let mut raw = Vec::new();
+    let _ = stream.read_to_end(&mut raw);
+    let raw = String::from_utf8(raw).unwrap();
+    let (head, body) = raw.split_once("\r\n\r\n").expect("http response");
+    let mut lines = head.lines();
+    let status: u16 = lines
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let headers = lines
+        .filter_map(|l| l.split_once(": "))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let body = if body.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(body).unwrap_or_else(|_| Value::String(body.to_string()))
+    };
+    Response {
+        status,
+        headers,
+        body,
     }
 }
 

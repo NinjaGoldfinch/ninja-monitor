@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use crate::config::{Config, DISCORD_WEBHOOK_ENV, Secrets};
+use crate::config::{Config, DISCORD_WEBHOOK_ENV, Secrets, url_origin};
 use crate::sampler::disk::mount_usage;
 
 /// One line per item, prefixed with `ok` or `WARN`.
@@ -85,7 +85,56 @@ pub fn report(config: &Config, secrets: &Secrets) -> Vec<String> {
             ),
         );
     }
+    if config.push.enabled {
+        line(
+            secrets.push_token.is_some(),
+            format!(
+                "push: {} set in this environment (systemd loads it from the env file)",
+                config.push.token_env
+            ),
+        );
+        if let Some(origin) = config.push.url.as_deref().and_then(url_origin) {
+            let (ok, text) = probe_ingest(&origin);
+            line(ok, format!("push: {origin}/healthz {text}"));
+        }
+    }
     lines
+}
+
+/// GETs the ingest server's `/healthz`. Sends nothing else.
+fn probe_ingest(origin: &str) -> (bool, String) {
+    let agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(std::time::Duration::from_secs(5)))
+        .build()
+        .new_agent();
+    match agent.get(format!("{origin}/healthz")).call() {
+        Ok(mut response) if response.status().is_success() => {
+            let version = response
+                .body_mut()
+                .read_to_string()
+                .ok()
+                .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+                .and_then(|v| {
+                    v["version"]
+                        .as_str()
+                        .map(|s| format!(" (ninja-ingest {s})"))
+                })
+                .unwrap_or_default();
+            (true, format!("reachable{version}"))
+        }
+        Ok(response) => (
+            false,
+            format!("answered HTTP {}", response.status().as_u16()),
+        ),
+        Err(err) => (
+            false,
+            format!(
+                "not reachable: {}",
+                crate::alerts::notify::describe_error(&err)
+            ),
+        ),
+    }
 }
 
 #[cfg(test)]

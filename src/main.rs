@@ -21,7 +21,8 @@ Options:
 
 Environment:
   NINJA_MONITOR_LOG              Log level: error, warn, info (default), debug, trace
-  NINJA_MONITOR_DISCORD_WEBHOOK  Discord webhook URL";
+  NINJA_MONITOR_DISCORD_WEBHOOK  Discord webhook URL
+  NINJA_MONITOR_PUSH_TOKEN       Bearer token for the ingest server, if [push] is enabled";
 
 enum Command {
     Run(PathBuf),
