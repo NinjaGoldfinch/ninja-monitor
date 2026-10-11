@@ -216,12 +216,12 @@ pub fn render(host_name: &str, services: &[Detected], memory_threshold: u64) -> 
     let _ = writeln!(
         w,
         "[discord]\n\
-         # The webhook URL lives in /etc/ninja-monitor/env (sudo ./deploy/install.sh --webhook).\n\
+         # The webhook URL lives in /etc/ninja-monitor/env (sudo ./install.sh --webhook).\n\
          enabled = true\n\
          startup_message = true\n\
          \n\
          [heartbeat]\n\
-         # The URL lives in /etc/ninja-monitor/env (sudo ./deploy/install.sh --heartbeat).\n\
+         # The URL lives in /etc/ninja-monitor/env (sudo ./install.sh --heartbeat).\n\
          enabled = false\n\
          url_env = \"NINJA_MONITOR_HEARTBEAT_URL\"\n\
          interval = \"60s\"\n\

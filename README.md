@@ -1,5 +1,7 @@
 # ninja-monitor
 
+[![CI](https://github.com/NinjaGoldfinch/ninja-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/NinjaGoldfinch/ninja-monitor/actions/workflows/ci.yml)
+
 A small Rust daemon that watches one Linux VPS. It samples CPU, memory and disk
 usage for the host and for each configured systemd service, keeps recent
 history in memory, serves it as JSON on localhost, sends alerts to a Discord
@@ -77,24 +79,20 @@ Any missing or unreadable value is reported as `null`, never as 0.
 
 ## Setup
 
-Everything happens on the server, over SSH. Building needs up to about
-900 MiB of free memory for a minute or two (see
-[Build memory](#build-memory) for a lighter option). The running monitor
-itself uses only 2 to 8 MiB.
+Everything happens on the server, over SSH. Each
+[release](https://github.com/NinjaGoldfinch/ninja-monitor/releases) has a
+static binary for x86_64 and ARM, bundled with the install script, so the
+server needs no compiler:
 
 ```sh
-# 1. Tools: a C compiler (for TLS) and Rust
-sudo apt-get update && sudo apt-get install -y build-essential git curl
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-. "$HOME/.cargo/env"
-
-# 2. Get the code and build it
-git clone https://github.com/NinjaGoldfinch/ninja-monitor.git
+arch=$(uname -m)   # x86_64 or aarch64
+base=https://github.com/NinjaGoldfinch/ninja-monitor/releases/latest/download
+curl -fsSLO "$base/ninja-monitor-$arch-linux.tar.gz"
+curl -fsSLO "$base/SHA256SUMS"
+sha256sum --ignore-missing -c SHA256SUMS
+tar -xzf "ninja-monitor-$arch-linux.tar.gz"
 cd ninja-monitor
-cargo build --release
-
-# 3. Install, save the Discord webhook (asked for, not echoed) and start
-sudo ./deploy/install.sh --webhook --start
+sudo ./install.sh --webhook --start   # asks for the Discord webhook, input hidden
 ```
 
 That's it. On first install, `install.sh` writes
@@ -109,20 +107,29 @@ Before starting, it checks the whole setup as the service's own user, with
 your secrets loaded, and prints one `ok` or `WARN` line per item. It
 refuses to start if the config is invalid.
 
+Releases are built by GitHub Actions from the tagged commit and carry a signed
+build provenance attestation. If you have the GitHub CLI, you can confirm a
+download came from this repository's workflow:
+
+```sh
+gh attestation verify "ninja-monitor-$arch-linux.tar.gz" --repo NinjaGoldfinch/ninja-monitor
+```
+
 ### Everyday commands
 
-All of these run on the server, from the `ninja-monitor` checkout:
+All of these run on the server, from the extracted `ninja-monitor` directory.
+(In a source checkout, the script is `./deploy/install.sh`.)
 
 | Task | Command |
 |---|---|
-| Upgrade | `git pull && cargo build --release && sudo ./deploy/install.sh --start` |
-| Change the webhook | `sudo ./deploy/install.sh --webhook --start` |
-| Turn on the heartbeat | `sudo ./deploy/install.sh --heartbeat --start` |
-| Edit the config | `sudoedit /etc/ninja-monitor/config.toml && sudo ./deploy/install.sh --start` |
-| Re-detect services | `sudo ./deploy/install.sh --reconfigure --start` (the old config is kept as `config.toml.bak`) |
-| Check the setup | `sudo ./deploy/install.sh` (installs nothing new, starts nothing) |
+| Upgrade | Run the download commands above again, then `sudo ./install.sh --start` |
+| Change the webhook | `sudo ./install.sh --webhook --start` |
+| Turn on the heartbeat | `sudo ./install.sh --heartbeat --start` |
+| Edit the config | `sudoedit /etc/ninja-monitor/config.toml && sudo ./install.sh --start` |
+| Re-detect services | `sudo ./install.sh --reconfigure --start` (the old config is kept as `config.toml.bak`) |
+| Check the setup | `sudo ./install.sh` (installs the same binary again, starts nothing) |
 | Status and logs | `systemctl status ninja-monitor` and `journalctl -u ninja-monitor -f` |
-| Remove it | `sudo ./deploy/install.sh --uninstall` (keeps `/etc/ninja-monitor`) |
+| Remove it | `sudo ./install.sh --uninstall` (keeps `/etc/ninja-monitor`) |
 
 `install.sh` is safe to run any number of times. It never overwrites the
 config or the env file unless you ask (`--reconfigure`, `--webhook`,
@@ -143,7 +150,24 @@ skipped, add a `[[service]]` block to the config (see
 --state=running` lists unit names, and `systemd-cgtop -1` shows which ones have
 a cgroup under `/system.slice/`.
 
-### Build memory
+### Building from source on the server
+
+If you prefer to build it yourself, or want unreleased changes:
+
+```sh
+sudo apt-get update && sudo apt-get install -y build-essential git curl
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+. "$HOME/.cargo/env"
+git clone https://github.com/NinjaGoldfinch/ninja-monitor.git
+cd ninja-monitor
+cargo build --release
+sudo ./deploy/install.sh --webhook --start
+```
+
+To upgrade: `git pull && cargo build --release && sudo ./deploy/install.sh --start`.
+Building needs up to about 900 MiB of free memory for a minute or two.
+
+#### Build memory
 
 Compiling is the only expensive part, and only while `cargo build` runs.
 Most of the peak is one step: the final optimisation of ninja-monitor itself,
@@ -166,7 +190,7 @@ command, or build somewhere else (below). On a fast machine `-j 1` roughly
 doubles the build time, from about 15 to about 30 seconds; a small VPS will be
 slower.
 
-### Removing the build files
+#### Removing the build files
 
 `install.sh` copies the binary to `/usr/local/bin`, so nothing the service uses
 lives in the checkout or the Rust toolchain. Once installed you can reclaim
@@ -180,13 +204,13 @@ the space:
 
 Keep the checkout if you can: its `deploy/install.sh` is how you change the
 webhook, regenerate the config or uninstall. If you delete it, clone it again
-when you need those. Upgrading means building again, so reinstall Rust first
-(step 1 of [Setup](#setup)).
+or download a release when you need those. Upgrading from source means
+building again, so reinstall Rust first.
 
-### Building somewhere else
+### Building on another machine
 
-If you would rather not install Rust on the server, build a static binary
-elsewhere and pass its path to `install.sh`. From macOS, with
+To cross-compile a static binary yourself and pass its path to `install.sh`
+(this is what the releases do, natively). From macOS, with
 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild):
 
 ```sh
@@ -397,7 +421,7 @@ Everything in `/proc` and `/sys/fs/cgroup` that ninja-monitor reads is
 world-readable, so host and service metrics need no extra rights. **Disk usage
 for a service's `paths` does**: the `ninja-monitor` user can only measure what
 it can read. Unreadable parts are skipped, the total becomes a lower bound and
-a warning is logged once per path. Running `sudo ./deploy/install.sh` shows
+a warning is logged once per path. Running `sudo ./install.sh` shows
 which paths are unreadable.
 
 To let it read a data directory, pick one:
@@ -446,6 +470,21 @@ curl -s localhost:9090/stats             # terminal 3
 
 Set `NINJA_MONITOR_DISCORD_WEBHOOK` before `cargo run` to try alerts against a
 real channel. The dev config has rules that fire and resolve on their own.
+
+### Continuous integration and releases
+
+Every push and pull request runs formatting, clippy and the tests on Linux and
+macOS, plus shellcheck on the scripts
+([`ci.yml`](.github/workflows/ci.yml)). To publish a release:
+
+1. Bump `version` in `Cargo.toml`, run `cargo build` to update `Cargo.lock`,
+   and commit.
+2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+
+[`release.yml`](.github/workflows/release.yml) then runs the checks again,
+builds static binaries natively on x86_64 and ARM runners, smoke-tests them,
+attests their provenance and publishes the release with `SHA256SUMS`. It
+refuses a tag that does not match the version in `Cargo.toml`.
 
 ### Design
 
