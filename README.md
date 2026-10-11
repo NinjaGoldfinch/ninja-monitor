@@ -77,8 +77,10 @@ Any missing or unreadable value is reported as `null`, never as 0.
 
 ## Setup
 
-Everything happens on the server, over SSH. Building there needs about
-800 MiB of free memory for a minute or two.
+Everything happens on the server, over SSH. Building needs up to about
+900 MiB of free memory for a minute or two (see
+[Build memory](#build-memory) for a lighter option). The running monitor
+itself uses only 2 to 8 MiB.
 
 ```sh
 # 1. Tools: a C compiler (for TLS) and Rust
@@ -140,6 +142,46 @@ skipped, add a `[[service]]` block to the config (see
 [Configuration](#configuration)). `systemctl list-units --type=service
 --state=running` lists unit names, and `systemd-cgtop -1` shows which ones have
 a cgroup under `/system.slice/`.
+
+### Build memory
+
+Compiling is the only expensive part, and only while `cargo build` runs.
+Most of the peak is one step: the final optimisation of ninja-monitor itself,
+which `lto = true` and `codegen-units = 1` make heavy in exchange for a smaller
+binary. Running fewer jobs at once therefore helps less than you might expect.
+
+Measured on Ubuntu 24.04 (Rust 1.99), as the peak combined memory of all build
+processes:
+
+| Command | Peak memory | Binary |
+|---|---|---|
+| `cargo build --release` on 2 cores (the default) | 830 to 900 MiB | 1.9 MiB |
+| `cargo build --release -j 1` | 820 MiB | 1.9 MiB |
+| `CARGO_PROFILE_RELEASE_LTO=thin cargo build --release -j 1` | 580 MiB | 2.4 MiB |
+| `CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo build --release -j 1` | 500 MiB | 2.8 MiB |
+
+The last two only change this one build; nothing in the repository needs
+editing. On a machine without swap that is short of memory, use the last
+command, or build somewhere else (below). On a fast machine `-j 1` roughly
+doubles the build time, from about 15 to about 30 seconds; a small VPS will be
+slower.
+
+### Removing the build files
+
+`install.sh` copies the binary to `/usr/local/bin`, so nothing the service uses
+lives in the checkout or the Rust toolchain. Once installed you can reclaim
+the space:
+
+| Command | Frees | Note |
+|---|---|---|
+| `cargo clean` | about 200 MB | Build output in `target/`. |
+| `rustup self uninstall` | about 730 MB | The Rust toolchain and download cache (`~/.rustup`, `~/.cargo`). |
+| `cd .. && rm -rf ninja-monitor` | a few MB | The checkout. |
+
+Keep the checkout if you can: its `deploy/install.sh` is how you change the
+webhook, regenerate the config or uninstall. If you delete it, clone it again
+when you need those. Upgrading means building again, so reinstall Rust first
+(step 1 of [Setup](#setup)).
 
 ### Building somewhere else
 
