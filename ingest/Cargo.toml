@@ -1,6 +1,6 @@
 [package]
 name = "ninja-ingest"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Central ingestion server for ninja-monitor agents: stores pushed samples in SQLite and serves them"
