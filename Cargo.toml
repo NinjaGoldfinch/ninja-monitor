@@ -4,7 +4,7 @@ default-members = [".", "ingest"]
 
 [package]
 name = "ninja-monitor"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Lightweight per-service CPU, memory and disk monitor for a single Linux VPS"
