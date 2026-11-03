@@ -1,0 +1,12 @@
+# cargo-nextest. CI runs `--profile ci` (through cargo llvm-cov) and copies
+# the JUnit file to reports/junit.xml; `cargo test` still works locally.
+
+[profile.ci]
+# Report every failing test, not only the first binary's.
+fail-fast = false
+retries = 0
+failure-output = "immediate-final"
+
+[profile.ci.junit]
+# Written to <target-dir>/nextest/ci/junit.xml.
+path = "junit.xml"
