@@ -97,14 +97,14 @@ jobs:
           mkdir "$dir"
           cp "target/$TARGET/release/ninja-monitor" "$dir/"
           cp deploy/install.sh deploy/ninja-monitor.service deploy/env.example \
-            deploy/config.example.toml README.md LICENSE-MIT LICENSE-APACHE version.json "$dir/"
+            deploy/config.example.toml README.md LICENSE version.json "$dir/"
           tar -czf "ninja-monitor-$ARCH-linux.tar.gz" "$dir"
 
           dir=ninja-ingest
           mkdir "$dir"
           cp "target/$TARGET/release/ninja-ingest" "$dir/"
           cp deploy/install-ingest.sh deploy/proxmox-setup.sh deploy/ninja-ingest.service \
-            deploy/ingest.env.example deploy/ingest.config.example.toml LICENSE-MIT LICENSE-APACHE version.json "$dir/"
+            deploy/ingest.env.example deploy/ingest.config.example.toml LICENSE version.json "$dir/"
           cp ingest/README.md "$dir/README.md"
           tar -czf "ninja-ingest-$ARCH-linux.tar.gz" "$dir"
 
