@@ -1,5 +1,10 @@
 name: CI
 
+# Linux jobs run on the self-hosted Proxmox runner. A pull request from a fork
+# runs them on a hosted runner instead, so outside code never reaches the
+# runner (the repository also requires approval for outside contributors).
+# Every test job leaves reports/junit.xml and reports/coverage.xml for the CI
+# dashboard; NinjaGoldfinch/ninja-actions/test-report checks and uploads them.
 on:
   push:
     branches: [main]
@@ -18,13 +23,8 @@ env:
 
 jobs:
   test:
-    name: Test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        # Linux is the target; macOS is where development happens.
-        os: [ubuntu-24.04, macos-15]
-    runs-on: ${{ matrix.os }}
+    name: Test (linux)
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || fromJSON('["self-hosted","linux","proxmox"]') }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -33,8 +33,18 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy,llvm-tools
           rustup default stable
+
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2
+        with:
+          tool: cargo-nextest,cargo-llvm-cov
+
+      # checkout deletes ignored files, so on the self-hosted runner the build
+      # output lives outside the workspace and is reused between runs.
+      - name: Keep build output between runs
+        if: runner.environment == 'self-hosted'
+        run: echo "CARGO_TARGET_DIR=$HOME/.cache/cargo-target/${GITHUB_REPOSITORY#*/}" >> "$GITHUB_ENV"
 
       - name: Format
         run: cargo fmt --check
@@ -43,11 +53,44 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test
+        run: |
+          junit="${CARGO_TARGET_DIR:-target}/llvm-cov-target/nextest/ci/junit.xml"
+          rm -rf reports "$junit"
+          mkdir reports
+          status=0
+          cargo llvm-cov nextest --workspace --locked --profile ci --ignore-run-fail \
+            --cobertura --output-path reports/coverage.xml || status=$?
+          cp "$junit" reports/junit.xml || find "${CARGO_TARGET_DIR:-target}" -name junit.xml
+          [ "$status" = 0 ] || exit "$status"
+          # --ignore-run-fail keeps the coverage report when tests fail; fail here.
+          ! grep -qE '<testsuites[^>]* (failures|errors)="[1-9]' reports/junit.xml
+
+      - name: Report
+        if: always()
+        uses: NinjaGoldfinch/ninja-actions/test-report@v1
+
+  # macOS is where development happens. The runner is Linux, so this leg stays
+  # on a hosted runner (free for public repositories).
+  test-macos:
+    name: Test (macos-15)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Test
         run: cargo test --workspace --locked
 
   shellcheck:
     name: Shellcheck
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || fromJSON('["self-hosted","linux","proxmox"]') }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
