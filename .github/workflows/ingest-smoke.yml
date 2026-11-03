@@ -1,0 +1,43 @@
+name: ingest smoke
+
+# Checks the public ninja-ingest endpoint from outside the home network:
+# the read API answers through Cloudflare Access with the ci-ingest service
+# token, and the push route is open to agents (Access bypass) but still
+# refuses a request without an agent token. Run it by hand from the Actions
+# tab or with `gh workflow run ingest-smoke.yml`.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  smoke:
+    name: Smoke (ingest.ninjagoldfinch.com)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      INGEST: https://ingest.ninjagoldfinch.com
+    steps:
+      - name: GET /healthz through Access with the service token
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          body=$(curl -fsS --max-time 15 \
+            -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+            -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+            "$INGEST/healthz")
+          echo "$body"
+          echo "$body" | jq -e '.status == "ok"' > /dev/null
+
+      - name: GET /healthz without the token is sent to the Access login
+        run: |
+          code=$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' "$INGEST/healthz")
+          echo "status $code"
+          [ "$code" = 302 ] || [ "$code" = 403 ]
+
+      - name: POST /v1/ingest without an agent token reaches ingest and gets 401
+        run: |
+          code=$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' -X POST "$INGEST/v1/ingest")
+          echo "status $code"
+          [ "$code" = 401 ]
