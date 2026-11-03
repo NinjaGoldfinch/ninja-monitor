@@ -60,7 +60,7 @@ sha256sum --ignore-missing -c SHA256SUMS
 tar -xzf "ninja-ingest-$arch-linux.tar.gz"
 cd ninja-ingest
 sudo ./install-ingest.sh --webhook          # asks for the Discord webhook, input hidden
-sudo ./install-ingest.sh --add-agent vps    # prints the agent's token once
+sudo ./install-ingest.sh --add-agent vps    # the agent's [host] name; prints its token once
 sudo ./install-ingest.sh --start
 ```
 
@@ -138,6 +138,14 @@ curl -fsSLO https://raw.githubusercontent.com/NinjaGoldfinch/ninja-monitor/main/
 sh proxmox-setup.sh --agent vps
 ```
 
+Each agent name, here `vps`, must equal that agent's `[host] name`.
+`install.sh` writes the machine's hostname there on first install, so run
+`hostname` on the agent and use that. Pushes under any other name are
+refused with `host ... does not match the host this token belongs to`. To fix
+a mismatch afterwards, change `name` in the container's
+`/etc/ninja-ingest/config.toml` to match and run `install-ingest.sh --start`;
+the token stays the same.
+
 (The same script ships in the `ninja-ingest` release tarball.)
 
 It asks for the Discord webhook and a Cloudflare Tunnel token (both typed
@@ -160,7 +168,7 @@ afterwards, never through a command line. Options cover the usual knobs:
 v0.2.0` to pin a version. `--help` lists them all.
 
 Afterwards the container is an ordinary one: `pct enter <id>` for a shell,
-and `pct exec <id> -- /root/ninja-ingest/install-ingest.sh --add-agent
+and `pct exec <id> -- sh /root/ninja-ingest/install-ingest.sh --add-agent
 <name> --start` to add a host later. Upgrades are the normal download and
 `install-ingest.sh --start` inside it.
 

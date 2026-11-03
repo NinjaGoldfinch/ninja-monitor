@@ -8,7 +8,9 @@
 #   ./proxmox-setup.sh [options] --agent <name> [--agent <name> ...]
 #
 # Options:
-#   --agent <name>        a host that will push here (its [host] name); repeatable
+#   --agent <name>        a host that will push here; repeatable. Must equal that
+#                         agent's [host] name, which install.sh sets to the
+#                         machine's hostname: run `hostname` there to get it
 #   --id <ctid>           container id (default: next free id)
 #   --hostname <name>     container hostname (default: ninja-ingest)
 #   --storage <name>      storage for the root disk (default: local-lvm)
@@ -50,7 +52,7 @@ while [ $# -gt 0 ]; do
         --no-cloudflared) cloudflared=no ;;
         --expose) expose=yes; cloudflared=no ;;
         -h | --help)
-            sed -n '2,30s/^# \{0,1\}//p' "$0"
+            sed -n '2,31s/^# \{0,1\}//p' "$0"
             exit 0
             ;;
         *)
@@ -71,7 +73,7 @@ if ! command -v pct >/dev/null 2>&1; then
 fi
 if [ -z "$agents" ]; then
     echo "proxmox-setup.sh: name at least one agent with --agent <name> (you can add more later" >&2
-    echo "  with: pct exec <ctid> -- /root/ninja-ingest/install-ingest.sh --add-agent <name> --start)" >&2
+    echo "  with: pct exec <ctid> -- sh /root/ninja-ingest/install-ingest.sh --add-agent <name> --start)" >&2
     exit 2
 fi
 for name in $agents; do
@@ -191,7 +193,7 @@ sha256sum --ignore-missing -c SHA256SUMS >/dev/null
 tar -xzf \"ninja-ingest-\$arch-linux.tar.gz\"
 rm -f \"ninja-ingest-\$arch-linux.tar.gz\" SHA256SUMS
 cd ninja-ingest
-./install-ingest.sh >/dev/null
+sh ./install-ingest.sh >/dev/null
 "
 if [ "$expose" = yes ]; then
     echo "Binding ninja-ingest on all of the container's addresses (--expose)..."
@@ -206,7 +208,7 @@ fi
 # Agents: the token lines are the indented 64-hex lines the installer prints.
 tokens=''
 for name in $agents; do
-    out=$(in_ct "cd /root/ninja-ingest && ./install-ingest.sh --add-agent '$name'")
+    out=$(in_ct "cd /root/ninja-ingest && sh ./install-ingest.sh --add-agent '$name'")
     token=$(printf '%s\n' "$out" | awk '/^  [0-9a-f]{64}$/ { print $1 }' | tail -n 1)
     if [ -z "$token" ]; then
         printf '%s\n' "$out" >&2
@@ -252,7 +254,7 @@ done < /root/.ninja-secrets
 fi
 
 echo "Starting ninja-ingest..."
-in_ct "cd /root/ninja-ingest && ./install-ingest.sh --start" | sed 's/^/  /'
+in_ct "cd /root/ninja-ingest && sh ./install-ingest.sh --start" | sed 's/^/  /'
 
 if [ "$cloudflared" = yes ]; then
     echo "Installing cloudflared..."
@@ -282,6 +284,9 @@ echo
 echo "Agent tokens (shown once here; saved in the container's /etc/ninja-ingest/env):"
 printf '%s\n' "$tokens"
 echo
+echo "Each agent name must equal that agent's [host] name in /etc/ninja-monitor/config.toml"
+echo "(its hostname, unless changed); ninja-ingest rejects pushes under any other name."
+echo
 echo "Next steps:"
 if [ "$cloudflared" = yes ]; then
     echo "  1. In Zero Trust > Networks > Tunnels, add a public hostname to the tunnel"
@@ -304,4 +309,4 @@ echo "Useful afterwards:"
 echo "  pct enter $ctid                                   shell inside the container"
 echo "  pct exec $ctid -- journalctl -u ninja-ingest -f   follow the log"
 echo "  pct exec $ctid -- curl -s localhost:9091/hosts    who is reporting"
-echo "  pct exec $ctid -- /root/ninja-ingest/install-ingest.sh --add-agent <name> --start"
+echo "  pct exec $ctid -- sh /root/ninja-ingest/install-ingest.sh --add-agent <name> --start"
