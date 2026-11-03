@@ -1,0 +1,45 @@
+name: Deploy
+
+# Deploys a release to staging or prod through NinjaGoldfinch/ninja-actions/deploy.
+# The host health-checks the new release and rolls back by itself if it fails.
+# Rolling back on purpose is deploying the previous version: it is still on
+# the host, so there is no upload and it takes seconds. The prod environment
+# waits for approval. Only SERVICE and ASSET differ between repositories.
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: Where to deploy
+        type: choice
+        options: [staging, prod]
+        default: staging
+      version:
+        description: Release tag, e.g. v1.2.3
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.env }}
+  cancel-in-progress: false
+
+env:
+  SERVICE: ninja-monitor
+  ASSET: ninja-monitor-x86_64-linux.tar.gz
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.version }} to ${{ inputs.env }}
+    runs-on: [self-hosted, linux, proxmox]
+    environment: ${{ inputs.env }}
+    timeout-minutes: 10
+    steps:
+      - uses: NinjaGoldfinch/ninja-actions/deploy@v1
+        with:
+          service: ${{ env.SERVICE }}
+          version: ${{ inputs.version }}
+          asset: ${{ env.ASSET }}
+          host: ${{ vars.DEPLOY_HOST }}
+          known-hosts: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+          ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
