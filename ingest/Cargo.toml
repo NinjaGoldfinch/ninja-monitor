@@ -4,7 +4,7 @@ version = "0.2.2"
 edition = "2024"
 rust-version = "1.88"
 description = "Central ingestion server for ninja-monitor agents: stores pushed samples in SQLite and serves them"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/NinjaGoldfinch/ninja-monitor"
 publish = false
 
