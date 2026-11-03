@@ -8,7 +8,9 @@
 #
 # Options:
 #   --start             enable the service and (re)start it
-#   --add-agent <name>  add an agent (or rotate its token) and print the token once
+#   --add-agent <name>  add an agent (or rotate its token) and print the token once;
+#                       <name> must equal that agent's [host] name (its hostname,
+#                       unless changed in /etc/ninja-monitor/config.toml)
 #   --webhook           prompt for the Discord webhook URL, save it and turn Discord on
 #   --heartbeat         prompt for a heartbeat URL, save it and turn the heartbeat on
 #   --uninstall         stop and remove the service, binary and user
@@ -39,7 +41,7 @@ while [ $# -gt 0 ]; do
             ;;
         --add-agent=*) agent=${1#--add-agent=} ;;
         -h | --help)
-            sed -n '2,16s/^# \{0,1\}//p' "$0"
+            sed -n '2,17s/^# \{0,1\}//p' "$0"
             exit 0
             ;;
         -*)
@@ -188,6 +190,8 @@ if [ -n "$agent" ]; then
     echo "On that machine, run: sudo ./install.sh --push --start"
     echo "and paste this server's ingest URL and the token when asked."
     echo "Then restart here with --start so the new token is loaded."
+    echo "Its [host] name in /etc/ninja-monitor/config.toml must be $agent;"
+    echo "pushes under any other name are rejected."
 fi
 
 if [ "$webhook" = yes ]; then

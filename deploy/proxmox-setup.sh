@@ -8,7 +8,9 @@
 #   ./proxmox-setup.sh [options] --agent <name> [--agent <name> ...]
 #
 # Options:
-#   --agent <name>        a host that will push here (its [host] name); repeatable
+#   --agent <name>        a host that will push here; repeatable. Must equal that
+#                         agent's [host] name, which install.sh sets to the
+#                         machine's hostname: run `hostname` there to get it
 #   --id <ctid>           container id (default: next free id)
 #   --hostname <name>     container hostname (default: ninja-ingest)
 #   --storage <name>      storage for the root disk (default: local-lvm)
@@ -50,7 +52,7 @@ while [ $# -gt 0 ]; do
         --no-cloudflared) cloudflared=no ;;
         --expose) expose=yes; cloudflared=no ;;
         -h | --help)
-            sed -n '2,30s/^# \{0,1\}//p' "$0"
+            sed -n '2,31s/^# \{0,1\}//p' "$0"
             exit 0
             ;;
         *)
@@ -281,6 +283,9 @@ echo "Done. Container $ctid ($hostname) is up at ${ct_ip:-<no address yet>}."
 echo
 echo "Agent tokens (shown once here; saved in the container's /etc/ninja-ingest/env):"
 printf '%s\n' "$tokens"
+echo
+echo "Each agent name must equal that agent's [host] name in /etc/ninja-monitor/config.toml"
+echo "(its hostname, unless changed); ninja-ingest rejects pushes under any other name."
 echo
 echo "Next steps:"
 if [ "$cloudflared" = yes ]; then
