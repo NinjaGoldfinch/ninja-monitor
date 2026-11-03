@@ -54,14 +54,15 @@ jobs:
 
       - name: Test
         run: |
-          junit="${CARGO_TARGET_DIR:-target}/llvm-cov-target/nextest/ci/junit.xml"
+          # nextest writes JUnit under the workspace root, whatever CARGO_TARGET_DIR is.
+          junit=target/nextest/ci/junit.xml
           rm -rf reports "$junit"
           mkdir reports
           status=0
           cargo llvm-cov nextest --workspace --locked --profile ci --ignore-run-fail \
             --cobertura --output-path reports/coverage.xml || status=$?
-          cp "$junit" reports/junit.xml || find "${CARGO_TARGET_DIR:-target}" -name junit.xml
           [ "$status" = 0 ] || exit "$status"
+          cp "$junit" reports/junit.xml
           # --ignore-run-fail keeps the coverage report when tests fail; fail here.
           ! grep -qE '<testsuites[^>]* (failures|errors)="[1-9]' reports/junit.xml
 
