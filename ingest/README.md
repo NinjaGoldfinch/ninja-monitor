@@ -160,7 +160,7 @@ afterwards, never through a command line. Options cover the usual knobs:
 v0.2.0` to pin a version. `--help` lists them all.
 
 Afterwards the container is an ordinary one: `pct enter <id>` for a shell,
-and `pct exec <id> -- /root/ninja-ingest/install-ingest.sh --add-agent
+and `pct exec <id> -- sh /root/ninja-ingest/install-ingest.sh --add-agent
 <name> --start` to add a host later. Upgrades are the normal download and
 `install-ingest.sh --start` inside it.
 

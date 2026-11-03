@@ -71,7 +71,7 @@ if ! command -v pct >/dev/null 2>&1; then
 fi
 if [ -z "$agents" ]; then
     echo "proxmox-setup.sh: name at least one agent with --agent <name> (you can add more later" >&2
-    echo "  with: pct exec <ctid> -- /root/ninja-ingest/install-ingest.sh --add-agent <name> --start)" >&2
+    echo "  with: pct exec <ctid> -- sh /root/ninja-ingest/install-ingest.sh --add-agent <name> --start)" >&2
     exit 2
 fi
 for name in $agents; do
@@ -191,7 +191,7 @@ sha256sum --ignore-missing -c SHA256SUMS >/dev/null
 tar -xzf \"ninja-ingest-\$arch-linux.tar.gz\"
 rm -f \"ninja-ingest-\$arch-linux.tar.gz\" SHA256SUMS
 cd ninja-ingest
-./install-ingest.sh >/dev/null
+sh ./install-ingest.sh >/dev/null
 "
 if [ "$expose" = yes ]; then
     echo "Binding ninja-ingest on all of the container's addresses (--expose)..."
@@ -206,7 +206,7 @@ fi
 # Agents: the token lines are the indented 64-hex lines the installer prints.
 tokens=''
 for name in $agents; do
-    out=$(in_ct "cd /root/ninja-ingest && ./install-ingest.sh --add-agent '$name'")
+    out=$(in_ct "cd /root/ninja-ingest && sh ./install-ingest.sh --add-agent '$name'")
     token=$(printf '%s\n' "$out" | awk '/^  [0-9a-f]{64}$/ { print $1 }' | tail -n 1)
     if [ -z "$token" ]; then
         printf '%s\n' "$out" >&2
@@ -252,7 +252,7 @@ done < /root/.ninja-secrets
 fi
 
 echo "Starting ninja-ingest..."
-in_ct "cd /root/ninja-ingest && ./install-ingest.sh --start" | sed 's/^/  /'
+in_ct "cd /root/ninja-ingest && sh ./install-ingest.sh --start" | sed 's/^/  /'
 
 if [ "$cloudflared" = yes ]; then
     echo "Installing cloudflared..."
@@ -304,4 +304,4 @@ echo "Useful afterwards:"
 echo "  pct enter $ctid                                   shell inside the container"
 echo "  pct exec $ctid -- journalctl -u ninja-ingest -f   follow the log"
 echo "  pct exec $ctid -- curl -s localhost:9091/hosts    who is reporting"
-echo "  pct exec $ctid -- /root/ninja-ingest/install-ingest.sh --add-agent <name> --start"
+echo "  pct exec $ctid -- sh /root/ninja-ingest/install-ingest.sh --add-agent <name> --start"
