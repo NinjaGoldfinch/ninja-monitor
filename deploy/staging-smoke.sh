@@ -26,8 +26,9 @@ base=${base%/}
 want="ninja-monitor/${version#v}"
 
 fail() { echo "smoke: $*" >&2; exit 1; }
-[ -n "${CF_ACCESS_CLIENT_ID:-}" ] && [ -n "${CF_ACCESS_CLIENT_SECRET:-}" ] ||
+if [ -z "${CF_ACCESS_CLIENT_ID:-}" ] || [ -z "${CF_ACCESS_CLIENT_SECRET:-}" ]; then
 	fail "CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET must be set"
+fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
