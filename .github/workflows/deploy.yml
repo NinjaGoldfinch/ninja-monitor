@@ -3,8 +3,18 @@ name: Deploy
 # Deploys a release to staging or prod through NinjaGoldfinch/ninja-actions/deploy.
 # The host health-checks the new release and rolls back by itself if it fails.
 # Rolling back on purpose is deploying the previous version: it is still on
-# the host, so there is no upload and it takes seconds. The prod environment
+# the host, so there is no upload and it takes seconds. release.yml calls this
+# with env staging for every release, with no approval; the prod environment
 # waits for approval. Only SERVICE and ASSET differ between repositories.
+#
+# Nothing reaches prod untested: after a staging deploy,
+# deploy/staging-smoke.sh checks that the staging agent's reports reach
+# ninja-ingest as the new version, and records the result as the commit status
+# `staging/smoke` on the version's commit. The action deploys to prod only a
+# version whose commit has `staging/smoke` or `prod/deployed` (live in prod
+# before, so rolling back to it is allowed) at success, and sets
+# `prod/deployed` once it is live. `break_glass` skips that check in an
+# emergency, with the reason in the log and the job summary.
 on:
   workflow_dispatch:
     inputs:
@@ -16,24 +26,61 @@ on:
       version:
         description: Release tag, e.g. v1.2.3
         required: true
+      break_glass:
+        description: Emergency only. Deploy to prod without the staging check; give the reason (it is logged)
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      env:
+        description: staging or prod
+        type: string
+        required: true
+      version:
+        description: Release tag, e.g. v1.2.3
+        type: string
+        required: true
 
 permissions:
   contents: read
 
-concurrency:
-  group: deploy-${{ inputs.env }}
-  cancel-in-progress: false
-
 env:
   SERVICE: ninja-monitor
   ASSET: ninja-monitor-x86_64-linux.tar.gz
+  INGEST: https://ingest.ninjagoldfinch.com
+  # The staging agent's name in ingest, which equals the staging host's hostname.
+  STAGING_AGENT: ngf-mon-syd1
 
 jobs:
+  # A called workflow takes any string; an unknown environment name would be
+  # created on the fly, without protection, before the deploy job could refuse it.
+  check:
+    name: Check the environment
+    runs-on: [self-hosted, linux, proxmox]
+    timeout-minutes: 2
+    steps:
+      - env:
+          ENV_NAME: ${{ inputs.env }}
+        run: |
+          case $ENV_NAME in
+          staging | prod) echo "deploying to $ENV_NAME" ;;
+          *) echo "::error::unknown environment '$ENV_NAME' (want staging or prod)"; exit 1 ;;
+          esac
+
   deploy:
     name: Deploy ${{ inputs.version }} to ${{ inputs.env }}
+    needs: check
     runs-on: [self-hosted, linux, proxmox]
     environment: ${{ inputs.env }}
+    # On the job, not the workflow, so it also holds when called.
+    concurrency:
+      group: deploy-${{ inputs.env }}
+      cancel-in-progress: false
     timeout-minutes: 10
+    permissions:
+      contents: read
+      # The action reads and sets prod's statuses; the smoke step sets staging/smoke.
+      statuses: write
     steps:
       - uses: NinjaGoldfinch/ninja-actions/deploy@v1
         with:
@@ -43,3 +90,39 @@ jobs:
           host: ${{ vars.DEPLOY_HOST }}
           known-hosts: ${{ vars.DEPLOY_KNOWN_HOSTS }}
           ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
+          require-status: ${{ inputs.env == 'prod' && 'staging/smoke prod/deployed' || '' }}
+          set-status: ${{ inputs.env == 'prod' && 'prod/deployed' || '' }}
+          unverified-reason: ${{ inputs.break_glass }}
+
+      # Staging only, once the release is live there. The script comes from this
+      # workflow's commit, so a smoke test can be rerun for an older release.
+      - if: inputs.env == 'staging'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The deploy already saw /healthz report the new version on the host; this
+      # checks the new agent samples and pushes, and ingest accepts it.
+      - name: Smoke test staging
+        id: smoke
+        if: inputs.env == 'staging'
+        env:
+          # Repository secrets (the ci-ingest Access service token); a call
+          # gets them through the caller's `secrets: inherit`.
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          VERSION: ${{ inputs.version }}
+        run: deploy/staging-smoke.sh "$INGEST" "$STAGING_AGENT" "$VERSION" 180
+      # Success or failure, on the version's commit; prod accepts only success.
+      - name: Record staging/smoke
+        if: always() && inputs.env == 'staging' && (steps.smoke.outcome == 'success' || steps.smoke.outcome == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          OUTCOME: ${{ steps.smoke.outcome }}
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$VERSION" --jq .sha)
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$sha" \
+            -f state="$OUTCOME" -f context=staging/smoke \
+            -f description="Smoke test of $VERSION on staging: $OUTCOME" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >/dev/null
+          echo "staging/smoke=$OUTCOME on $VERSION ($sha)"
