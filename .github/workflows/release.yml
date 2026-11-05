@@ -156,3 +156,23 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
             ninja-*-linux.tar.gz SHA256SUMS
+
+  # Every release goes to staging by itself and is smoke-tested there; the
+  # result (commit status staging/smoke) decides whether it may go to prod.
+  # A release made with GITHUB_TOKEN starts no other workflow, so deploy.yml
+  # is called here instead of listening for `release: published`.
+  staging:
+    name: Deploy to staging
+    needs: release
+    permissions:
+      contents: read
+      statuses: write
+    uses: ./.github/workflows/deploy.yml
+    with:
+      env: staging
+      version: ${{ github.ref_name }}
+    # Without it the called deploy job gets the staging environment's variables
+    # but an empty DEPLOY_SSH_KEY, and the repository's CF_ACCESS_CLIENT_ID and
+    # CF_ACCESS_CLIENT_SECRET for the smoke test would be empty too: a called
+    # workflow sees only the secrets its caller passes on.
+    secrets: inherit

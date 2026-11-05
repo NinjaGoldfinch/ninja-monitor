@@ -539,6 +539,21 @@ publishes the release with `SHA256SUMS`. It refuses a tag that does not
 match the version in both `Cargo.toml` files; bump `ingest/Cargo.toml`
 together with the root one.
 
+Each release then deploys itself to staging (`ngf-mon-syd1`) through
+[`deploy.yml`](.github/workflows/deploy.yml), and
+[`deploy/staging-smoke.sh`](deploy/staging-smoke.sh) waits up to three
+minutes for the staging agent's reports to reach ninja-ingest as the new
+version. The result is the commit status `staging/smoke` on the tag's commit.
+A production deploy (run `deploy.yml` with env `prod`, then approve it) is
+refused unless that version has `staging/smoke` or `prod/deployed` (it was
+live in production before, so rolling back to it is allowed) at success. The
+`break_glass` input skips the check in an emergency and logs the reason. To
+see what a version has passed:
+
+```sh
+gh api repos/NinjaGoldfinch/ninja-monitor/commits/v0.2.2/status --jq '.statuses[] | "\(.context) \(.state)"'
+```
+
 ### Design
 
 One process, one broadcast channel. The sampler builds an immutable sample
