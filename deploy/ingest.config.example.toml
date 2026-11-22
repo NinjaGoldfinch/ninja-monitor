@@ -33,6 +33,7 @@ startup_message = true
 # A host with no samples for this long is announced as SILENT, and as
 # REPORTING when samples return. Keep it at least the agent's push back-off
 # cap (60s) plus two sampling intervals, so a short blip stays quiet.
+# Each [[agent]] can override this with its own silence_after.
 after = "2m"
 # Remind while a host stays silent. Omit for no reminders.
 # repeat = "6h"
@@ -53,3 +54,4 @@ interval = "60s"
 # [[agent]]
 # name = "vps"
 # token_env = "NINJA_INGEST_TOKEN_VPS"
+# silence_after = "10m"   # optional; overrides [silence] after for this host

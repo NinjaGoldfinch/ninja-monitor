@@ -14,11 +14,11 @@ use tracing::{debug, info, warn};
 use ninja_monitor::alerts::notify::{Queue, human_duration};
 use ninja_monitor::sampler::unix_millis;
 
-use crate::config::SilenceConfig;
+use crate::config::{AgentConfig, SilenceConfig};
 use crate::db::Db;
 use crate::store::{self, HostRow};
 
-/// Longest time between checks. Shorter `after` values check more often.
+/// Longest time between checks. Shorter thresholds check more often.
 pub const MAX_TICK: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,33 +40,53 @@ pub struct Transition {
 }
 
 pub struct Watcher {
+    /// Default threshold, from `[silence] after`.
     after_ms: u64,
+    /// Per-host overrides from `[[agent]] silence_after`.
+    per_host_ms: HashMap<String, u64>,
     repeat_ms: Option<u64>,
     /// Last time SILENT was posted for each host, for `repeat`.
     last_posted: HashMap<String, u64>,
 }
 
 impl Watcher {
-    pub fn new(config: &SilenceConfig) -> Self {
+    pub fn new(config: &SilenceConfig, agents: &[AgentConfig]) -> Self {
         Self {
             after_ms: config.after.as_millis() as u64,
+            per_host_ms: agents
+                .iter()
+                .filter_map(|a| {
+                    a.silence_after
+                        .map(|d| (a.name.clone(), d.as_millis() as u64))
+                })
+                .collect(),
             repeat_ms: config.repeat.map(|d| d.as_millis() as u64),
             last_posted: HashMap::new(),
         }
     }
 
-    /// How often to check.
+    fn after_for(&self, host: &str) -> u64 {
+        self.per_host_ms.get(host).copied().unwrap_or(self.after_ms)
+    }
+
+    /// How often to check: half the smallest threshold in use.
     pub fn tick(&self) -> Duration {
-        Duration::from_millis(self.after_ms / 2).clamp(Duration::from_millis(10), MAX_TICK)
+        let smallest = self
+            .per_host_ms
+            .values()
+            .copied()
+            .fold(self.after_ms, u64::min);
+        Duration::from_millis(smallest / 2).clamp(Duration::from_millis(10), MAX_TICK)
     }
 
     pub fn evaluate(&mut self, rows: &[HostRow], now: u64) -> Vec<Transition> {
         let mut out = Vec::new();
         for row in rows {
             let quiet_for = now.saturating_sub(row.last_seen);
+            let after = self.after_for(&row.name);
             match row.silent_since {
-                None if quiet_for >= self.after_ms => {
-                    let since = row.last_seen + self.after_ms;
+                None if quiet_for >= after => {
+                    let since = row.last_seen + after;
                     self.last_posted.insert(row.name.clone(), now);
                     out.push(Transition {
                         host_id: row.id,
@@ -82,7 +102,7 @@ impl Watcher {
                     });
                 }
                 None => {}
-                Some(since) if quiet_for < self.after_ms => {
+                Some(since) if quiet_for < after => {
                     self.last_posted.remove(&row.name);
                     out.push(Transition {
                         host_id: row.id,
@@ -144,8 +164,13 @@ pub fn format_utc(ms: u64) -> String {
 }
 
 /// Checks on a timer until the task is aborted.
-pub async fn run(db: Db, config: SilenceConfig, queue: Option<Arc<Queue>>) {
-    let mut watcher = Watcher::new(&config);
+pub async fn run(
+    db: Db,
+    config: SilenceConfig,
+    agents: Vec<AgentConfig>,
+    queue: Option<Arc<Queue>>,
+) {
+    let mut watcher = Watcher::new(&config, &agents);
     let mut ticker = tokio::time::interval(watcher.tick());
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
@@ -201,6 +226,15 @@ mod tests {
             .silence
     }
 
+    fn agent(name: &str, after: &str) -> AgentConfig {
+        crate::config::Config::parse(&format!(
+            "[[agent]]\nname = \"{name}\"\ntoken_env = \"T_{name}\"\nsilence_after = \"{after}\""
+        ))
+        .unwrap()
+        .agents
+        .remove(0)
+    }
+
     fn row(name: &str, last_seen: u64, silent_since: Option<u64>) -> HostRow {
         HostRow {
             id: 1,
@@ -215,22 +249,22 @@ mod tests {
     #[test]
     fn tick_follows_after() {
         assert_eq!(
-            Watcher::new(&config("2m", None)).tick(),
+            Watcher::new(&config("2m", None), &[]).tick(),
             Duration::from_secs(30)
         );
         assert_eq!(
-            Watcher::new(&config("20s", None)).tick(),
+            Watcher::new(&config("20s", None), &[]).tick(),
             Duration::from_secs(10)
         );
         assert_eq!(
-            Watcher::new(&config("1ms", None)).tick(),
+            Watcher::new(&config("1ms", None), &[]).tick(),
             Duration::from_millis(10)
         );
     }
 
     #[test]
     fn silent_then_reporting() {
-        let mut w = Watcher::new(&config("2m", None));
+        let mut w = Watcher::new(&config("2m", None), &[]);
         let seen = 1_760_000_000_000;
         assert!(w.evaluate(&[row("vps", seen, None)], seen + M).is_empty());
         assert!(
@@ -271,7 +305,7 @@ mod tests {
     #[test]
     fn second_outage_repeat_clock_starts_at_its_own_silent() {
         const H: u64 = 60 * M;
-        let mut w = Watcher::new(&config("2m", Some("6h")));
+        let mut w = Watcher::new(&config("2m", Some("6h")), &[]);
 
         // First outage, with a repeat.
         let seen = 1_760_000_000_000;
@@ -311,7 +345,7 @@ mod tests {
 
     #[test]
     fn repeat_while_silent_and_restart_does_not_refire() {
-        let mut w = Watcher::new(&config("2m", Some("10m")));
+        let mut w = Watcher::new(&config("2m", Some("10m")), &[]);
         let seen = 1_760_000_000_000;
         let went_silent = seen + 3 * M;
         let t = w.evaluate(&[row("vps", seen, None)], went_silent);
@@ -342,7 +376,7 @@ mod tests {
 
         // A fresh watcher (server restart) finds the host already silent:
         // no SILENT again, and the first repeat comes a full interval later.
-        let mut fresh = Watcher::new(&config("2m", Some("10m")));
+        let mut fresh = Watcher::new(&config("2m", Some("10m")), &[]);
         let start = went_silent + 30 * M;
         assert!(
             fresh
@@ -357,7 +391,7 @@ mod tests {
         assert_eq!(fresh.evaluate(&[silent], start + 10 * M).len(), 1);
 
         // Went silent while the server was down: reported at the first check.
-        let mut fresh = Watcher::new(&config("2m", None));
+        let mut fresh = Watcher::new(&config("2m", None), &[]);
         let t = fresh.evaluate(&[row("vps", seen, None)], seen + 60 * M);
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].kind, Kind::Silent);
@@ -365,7 +399,7 @@ mod tests {
 
     #[test]
     fn several_hosts_are_independent() {
-        let mut w = Watcher::new(&config("1m", None));
+        let mut w = Watcher::new(&config("1m", None), &[]);
         let now = 1_760_000_000_000;
         let rows = [
             row("a", now - 2 * M, None),
@@ -385,6 +419,62 @@ mod tests {
             (t[1].host.as_str(), &t[1].kind, t[1].host_id),
             ("c", &Kind::Reporting, 3)
         );
+    }
+
+    #[test]
+    fn per_host_longer_threshold() {
+        let mut w = Watcher::new(&config("2m", None), &[agent("home", "10m")]);
+        let seen = 1_760_000_000_000;
+        assert!(
+            w.evaluate(&[row("home", seen, None)], seen + 2 * M + 10 * S)
+                .is_empty()
+        );
+        let t = w.evaluate(&[row("home", seen, None)], seen + 10 * M);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].kind, Kind::Silent);
+        assert_eq!(t[0].set_silent_since, Some(Some(seen + 10 * M)));
+    }
+
+    #[test]
+    fn per_host_stricter_threshold_does_not_flap() {
+        let mut w = Watcher::new(&config("2m", None), &[agent("vps", "60s")]);
+        let seen = 1_760_000_000_000;
+        let t = w.evaluate(&[row("vps", seen, None)], seen + 61 * S);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].kind, Kind::Silent);
+        let silent = row("vps", seen, Some(seen + M));
+        assert!(w.evaluate(&[silent], seen + 90 * S).is_empty());
+    }
+
+    #[test]
+    fn unconfigured_host_keeps_default() {
+        let mut w = Watcher::new(&config("2m", None), &[agent("home", "10m")]);
+        let seen = 1_760_000_000_000;
+        let rows = [row("home", seen, None), row("other", seen, None)];
+        let t = w.evaluate(&rows, seen + 3 * M);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].host, "other");
+    }
+
+    #[test]
+    fn tick_follows_smallest_threshold() {
+        let w = Watcher::new(&config("10m", None), &[agent("vps", "60s")]);
+        assert_eq!(w.tick(), Duration::from_secs(30));
+        let w = Watcher::new(&config("2m", None), &[agent("home", "10m")]);
+        assert_eq!(w.tick(), Duration::from_secs(30));
+        let w = Watcher::new(&config("2m", None), &[agent("vps", "20s")]);
+        assert_eq!(w.tick(), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn reporting_uses_per_host_threshold() {
+        let mut w = Watcher::new(&config("2m", None), &[agent("home", "10m")]);
+        let seen = 1_760_000_000_000;
+        let back = seen + 15 * M;
+        let t = w.evaluate(&[row("home", back, Some(seen + 10 * M))], back + S);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].kind, Kind::Reporting);
+        assert_eq!(t[0].message, "**REPORTING** [home] back after 5m");
     }
 
     #[test]
