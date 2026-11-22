@@ -389,6 +389,9 @@ pub fn latest_sample(conn: &Connection, host: &HostRow) -> rusqlite::Result<Opti
 pub type HostWindow = (Vec<HostPoint>, Vec<(String, Vec<DiskPoint>)>);
 
 /// Host points and per-mount disk points with `from <= ts <= to`, oldest first.
+/// Every mount's column lines up with the host points even when the host's
+/// mount list changed inside the window: samples without a row for a mount
+/// get an empty slot.
 pub fn host_points(
     conn: &Connection,
     host_id: i64,
@@ -434,10 +437,27 @@ pub fn host_points(
         ))
     })? {
         let (mount, point) = row?;
-        match disks.iter_mut().find(|(m, _)| *m == mount) {
-            Some((_, points)) => points.push(point),
-            None => disks.push((mount, vec![point])),
-        }
+        // A disk row with no host sample (e.g. mid-sweep) can't be aligned.
+        let Ok(idx) = points.binary_search_by_key(&point.t, |p| p.t) else {
+            continue;
+        };
+        let at = match disks.iter().position(|(m, _)| *m == mount) {
+            Some(at) => at,
+            None => {
+                // First row for this mount: one empty slot per host sample.
+                let empty = points
+                    .iter()
+                    .map(|p| DiskPoint {
+                        t: p.t,
+                        used_bytes: pack_u64(None),
+                        used_percent: pack_f32(None),
+                    })
+                    .collect();
+                disks.push((mount, empty));
+                disks.len() - 1
+            }
+        };
+        disks[at].1[idx] = point;
     }
     Ok((points, disks))
 }
@@ -655,6 +675,90 @@ mod tests {
         assert_eq!(ev[0], evs[1]);
         assert_eq!(ev[1], evs[0]);
         assert_eq!(db.call_sync(|c| events(c, host.id, 1)).unwrap().len(), 1);
+    }
+
+    fn with_disks(t: u64, mounts: &[&str]) -> Sample {
+        let mut s = sample(t, None, None);
+        s.host.disks = mounts
+            .iter()
+            .map(|m| DiskSample {
+                mount: (*m).into(),
+                total_bytes: Some(100),
+                used_bytes: Some(t),
+                avail_bytes: Some(50),
+                used_percent: Some(50.0),
+            })
+            .collect();
+        s
+    }
+
+    fn window(samples: &[Sample]) -> HostWindow {
+        let db = Db::in_memory().unwrap();
+        db.call_sync(|c| insert_batch(c, "vps", None, 9000, samples, &[]))
+            .unwrap();
+        let host = db.call_sync(|c| host_by_name(c, "vps")).unwrap().unwrap();
+        db.call_sync(|c| host_points(c, host.id, 0, u64::MAX))
+            .unwrap()
+    }
+
+    fn column<'a>(disks: &'a [(String, Vec<DiskPoint>)], mount: &str) -> &'a [DiskPoint] {
+        &disks.iter().find(|(m, _)| m == mount).unwrap().1
+    }
+
+    #[test]
+    fn disk_columns_align_when_a_mount_is_added() {
+        let (points, disks) = window(&[
+            with_disks(1000, &["/"]),
+            with_disks(2000, &["/"]),
+            with_disks(3000, &["/", "/data"]),
+            with_disks(4000, &["/", "/data"]),
+        ]);
+        assert_eq!(points.len(), 4);
+        let names: Vec<_> = disks.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(names, ["/", "/data"]);
+        for (_, col) in &disks {
+            let times: Vec<u64> = col.iter().map(|p| p.t).collect();
+            assert_eq!(times, [1000, 2000, 3000, 4000]);
+        }
+        let data = column(&disks, "/data");
+        let used: Vec<_> = data.iter().map(|p| unpack_u64(p.used_bytes)).collect();
+        assert_eq!(used, [None, None, Some(3000), Some(4000)]);
+        let pct: Vec<_> = data.iter().map(|p| unpack_f32(p.used_percent)).collect();
+        assert_eq!(pct, [None, None, Some(50.0), Some(50.0)]);
+    }
+
+    #[test]
+    fn disk_columns_align_when_a_mount_is_removed() {
+        let (points, disks) = window(&[
+            with_disks(1000, &["/", "/mnt/backup"]),
+            with_disks(2000, &["/", "/mnt/backup"]),
+            with_disks(3000, &["/"]),
+            with_disks(4000, &["/"]),
+        ]);
+        assert_eq!(points.len(), 4);
+        assert_eq!(column(&disks, "/").len(), 4);
+        let backup = column(&disks, "/mnt/backup");
+        assert_eq!(backup.len(), points.len());
+        let times: Vec<u64> = backup.iter().map(|p| p.t).collect();
+        assert_eq!(times, [1000, 2000, 3000, 4000]);
+        let used: Vec<_> = backup.iter().map(|p| unpack_u64(p.used_bytes)).collect();
+        assert_eq!(used, [Some(1000), Some(2000), None, None]);
+        let pct: Vec<_> = backup.iter().map(|p| unpack_f32(p.used_percent)).collect();
+        assert_eq!(pct, [Some(50.0), Some(50.0), None, None]);
+    }
+
+    #[test]
+    fn disk_columns_align_when_a_mount_is_removed_and_readded() {
+        let (_, disks) = window(&[
+            with_disks(1000, &["/", "/data"]),
+            with_disks(2000, &["/"]),
+            with_disks(3000, &["/", "/data"]),
+        ]);
+        let used: Vec<_> = column(&disks, "/data")
+            .iter()
+            .map(|p| unpack_u64(p.used_bytes))
+            .collect();
+        assert_eq!(used, [Some(1000), None, Some(3000)]);
     }
 
     #[test]

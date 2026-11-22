@@ -59,6 +59,10 @@ pub enum Outcome {
 pub struct Batch {
     pub samples: usize,
     pub events: usize,
+    /// Front evictions so far when the batch was taken. Anything evicted
+    /// since was part of the batch, so fewer of its items remain queued.
+    samples_evicted_at: u64,
+    events_evicted_at: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +79,9 @@ pub struct State {
     /// Set while samples are being dropped, so the warning is logged once.
     overflowing: bool,
     dropped: u64,
+    /// Samples and events popped off the front by overflow, ever.
+    samples_evicted: u64,
+    events_evicted: u64,
     flush_ms: u64,
     alert_after_ms: u64,
     max_batch: usize,
@@ -99,6 +106,8 @@ impl State {
             capacity: config.capacity(sampling_interval),
             overflowing: false,
             dropped: 0,
+            samples_evicted: 0,
+            events_evicted: 0,
             flush_ms: flush.as_millis().max(1) as u64,
             alert_after_ms: config.alert_after.as_millis() as u64,
             max_batch: MAX_BATCH,
@@ -127,6 +136,7 @@ impl State {
     pub fn push_sample(&mut self, sample: Arc<Sample>) {
         if self.samples.len() >= self.capacity {
             self.samples.pop_front();
+            self.samples_evicted += 1;
             self.dropped += 1;
             if !self.overflowing {
                 self.overflowing = true;
@@ -142,6 +152,7 @@ impl State {
     pub fn push_event(&mut self, event: AlertEvent) {
         if self.events.len() >= EVENT_CAPACITY {
             self.events.pop_front();
+            self.events_evicted += 1;
         }
         self.events.push_back(event);
     }
@@ -167,6 +178,8 @@ impl State {
         let batch = Batch {
             samples: samples.len(),
             events: events.len(),
+            samples_evicted_at: self.samples_evicted,
+            events_evicted_at: self.events_evicted,
         };
         let body = serde_json::to_string(&Body {
             agent: concat!("ninja-monitor/", env!("CARGO_PKG_VERSION")),
@@ -297,8 +310,15 @@ impl State {
     }
 
     fn remove(&mut self, batch: &Batch) {
-        self.samples.drain(..batch.samples.min(self.samples.len()));
-        self.events.drain(..batch.events.min(self.events.len()));
+        // Overflow may have evicted some of the batch while it was in flight.
+        let samples = batch
+            .samples
+            .saturating_sub((self.samples_evicted - batch.samples_evicted_at) as usize);
+        let events = batch
+            .events
+            .saturating_sub((self.events_evicted - batch.events_evicted_at) as usize);
+        self.samples.drain(..samples.min(self.samples.len()));
+        self.events.drain(..events.min(self.events.len()));
     }
 }
 
@@ -517,13 +537,7 @@ mod tests {
         assert!(s.overflowing);
         assert_eq!(s.dropped, 2);
         let (batch, body) = s.next_batch().unwrap();
-        assert_eq!(
-            batch,
-            Batch {
-                samples: 4,
-                events: 0
-            }
-        );
+        assert_eq!((batch.samples, batch.events), (4, 0));
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["host"], "vps");
         assert_eq!(v["samples"][0]["timestamp"], 3);
@@ -538,13 +552,7 @@ mod tests {
         }
         s.push_event(event(1));
         let (batch, _) = s.next_batch().unwrap();
-        assert_eq!(
-            batch,
-            Batch {
-                samples: 200,
-                events: 1
-            }
-        );
+        assert_eq!((batch.samples, batch.events), (200, 1));
         // A new sample and event arrive while the request is in flight.
         s.push_sample(sample(250));
         s.push_event(event(2));
@@ -554,6 +562,38 @@ mod tests {
         assert_eq!(s.next_batch().unwrap().0.events, 1);
         assert!(!s.due(100 * S + 14 * S));
         assert!(s.due(100 * S + 15 * S));
+    }
+
+    #[test]
+    fn success_after_overflow_keeps_unsent_samples() {
+        let mut s = state("buffer = \"1m\"");
+        for t in 1..=4 {
+            s.push_sample(sample(t));
+        }
+        let (batch, _) = s.next_batch().unwrap();
+        assert_eq!(batch.samples, 4);
+        s.push_sample(sample(5));
+        s.settle(&batch, &Outcome::Accepted, 100 * S);
+        assert_eq!(s.buffered(), 1);
+        let (_, body) = s.next_batch().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["samples"][0]["timestamp"], 5);
+    }
+
+    #[test]
+    fn success_after_overflow_keeps_unsent_events() {
+        let mut s = state("");
+        for t in 1..=EVENT_CAPACITY as u64 {
+            s.push_event(event(t));
+        }
+        let (batch, _) = s.next_batch().unwrap();
+        assert_eq!(batch.events, EVENT_CAPACITY);
+        s.push_event(event(1000));
+        s.settle(&batch, &Outcome::Accepted, 100 * S);
+        assert_eq!(s.pending_events(), 1);
+        let (_, body) = s.next_batch().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["events"][0]["timestamp"], 1000);
     }
 
     #[test]
@@ -698,12 +738,7 @@ mod tests {
         }
         assert_eq!(s.pending_events(), EVENT_CAPACITY);
         assert!(s.due(0), "events alone are worth a request");
-        assert_eq!(
-            s.next_batch().unwrap().0,
-            Batch {
-                samples: 0,
-                events: EVENT_CAPACITY
-            }
-        );
+        let (batch, _) = s.next_batch().unwrap();
+        assert_eq!((batch.samples, batch.events), (0, EVENT_CAPACITY));
     }
 }

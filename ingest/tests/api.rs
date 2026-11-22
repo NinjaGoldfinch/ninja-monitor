@@ -281,6 +281,69 @@ fn history_matches_the_agent_exactly() {
 }
 
 #[test]
+fn history_disks_stay_aligned_when_mounts_change() {
+    use ninja_monitor::sample::DiskSample;
+    let disk = |mount: &str| DiskSample {
+        mount: mount.into(),
+        total_bytes: Some(100),
+        used_bytes: Some(40),
+        avail_bytes: Some(60),
+        used_percent: Some(40.0),
+    };
+    let server = Server::start("");
+
+    // home: /data added for the second half. vps: /mnt/backup removed.
+    let mut home = series("home", 20, 60_000);
+    for s in &mut home[10..] {
+        s.host.disks.push(disk("/data"));
+    }
+    let mut vps = series("vps", 20, 60_000);
+    for s in &mut vps[..10] {
+        s.host.disks.push(disk("/mnt/backup"));
+    }
+    server.push(TOKEN_HOME, "home", &home, &[]);
+    server.push(TOKEN_VPS, "vps", &vps, &[]);
+
+    for (host, mount, null_first) in [("home", "/data", true), ("vps", "/mnt/backup", false)] {
+        for max_points in [720, 3] {
+            let (status, body) = server.get(&format!(
+                "/hosts/{host}/history?scope=host&minutes=60&max_points={max_points}"
+            ));
+            assert_eq!(status, 200, "{body}");
+            let n = body["t"].as_array().unwrap().len();
+            assert!(n >= 3);
+            let disks = body["disks"].as_array().unwrap();
+            assert_eq!(disks.len(), 2, "{body}");
+            for d in disks {
+                for field in ["used_bytes", "used_percent"] {
+                    assert_eq!(d[field].as_array().unwrap().len(), n, "{host} {d}");
+                }
+            }
+            let d = disks.iter().find(|d| d["mount"] == mount).unwrap();
+            for field in ["used_bytes", "used_percent"] {
+                let col = d[field].as_array().unwrap();
+                let (first, last) = (&col[0], &col[n - 1]);
+                if null_first {
+                    assert!(first.is_null() && !last.is_null(), "{host} {col:?}");
+                } else {
+                    assert!(!first.is_null() && last.is_null(), "{host} {col:?}");
+                }
+            }
+            let col = d["used_bytes"].as_array().unwrap();
+            if max_points == 720 {
+                assert_eq!(col.iter().filter(|v| v.is_null()).count(), 10);
+            }
+            // Mixed buckets average only the values present.
+            assert!(
+                col.iter()
+                    .filter(|v| !v.is_null())
+                    .all(|v| v.as_f64() == Some(40.0))
+            );
+        }
+    }
+}
+
+#[test]
 fn history_windows_and_errors() {
     let server = Server::start("storage.retention = \"2h\"");
     let samples = series("vps", 10, 0);

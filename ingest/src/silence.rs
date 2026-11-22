@@ -269,6 +269,47 @@ mod tests {
     }
 
     #[test]
+    fn second_outage_repeat_clock_starts_at_its_own_silent() {
+        const H: u64 = 60 * M;
+        let mut w = Watcher::new(&config("2m", Some("6h")));
+
+        // First outage, with a repeat.
+        let seen = 1_760_000_000_000;
+        let silent1 = seen + 2 * M + 14 * S;
+        let t = w.evaluate(&[row("home", seen, None)], silent1);
+        assert_eq!(t[0].kind, Kind::Silent);
+        let silent_row = row("home", seen, Some(seen + 2 * M));
+        assert!(
+            w.evaluate(std::slice::from_ref(&silent_row), silent1 + 30 * S)
+                .is_empty()
+        );
+        let t = w.evaluate(std::slice::from_ref(&silent_row), silent1 + 6 * H);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].kind, Kind::Repeat);
+        let back = seen + 7 * H + 24 * M;
+        let t = w.evaluate(&[row("home", back, Some(seen + 2 * M))], back + S);
+        assert_eq!(t[0].kind, Kind::Reporting);
+
+        // Second outage days later, same Watcher.
+        let seen2 = seen + 5 * 24 * H;
+        let silent2 = seen2 + 2 * M + 6 * S;
+        let t = w.evaluate(&[row("home", seen2, None)], silent2);
+        assert_eq!(t[0].kind, Kind::Silent);
+        let silent_row = row("home", seen2, Some(seen2 + 2 * M));
+        assert!(
+            w.evaluate(std::slice::from_ref(&silent_row), silent2 + 30 * S)
+                .is_empty()
+        );
+        assert!(
+            w.evaluate(std::slice::from_ref(&silent_row), silent2 + 6 * H - 1)
+                .is_empty()
+        );
+        let t = w.evaluate(std::slice::from_ref(&silent_row), silent2 + 6 * H);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].kind, Kind::Repeat);
+    }
+
+    #[test]
     fn repeat_while_silent_and_restart_does_not_refire() {
         let mut w = Watcher::new(&config("2m", Some("10m")));
         let seen = 1_760_000_000_000;
