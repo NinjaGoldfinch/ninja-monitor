@@ -264,8 +264,12 @@ fn metric_value(rule: &AlertRule, sample: &Sample, service: Option<&ServiceSampl
         // No swap at all means there is nothing to alert on.
         (Scope::Host, Metric::SwapUsedPercent) => percent(h.swap_used_bytes, h.swap_total_bytes),
         (Scope::Host, Metric::DiskUsedPercent) => {
-            let mount = rule.mount.as_ref()?.display().to_string();
-            h.disks.iter().find(|d| d.mount == mount)?.used_percent
+            // Compare as paths, as `Config::validate_rule` does.
+            let mount = rule.mount.as_ref()?;
+            h.disks
+                .iter()
+                .find(|d| std::path::Path::new(&d.mount) == mount.as_path())?
+                .used_percent
         }
         (Scope::Service(_), metric) => {
             let s = service?;
@@ -401,6 +405,32 @@ mod tests {
 
     fn state(e: &Engine) -> RuleState {
         e.view().rules[0].state
+    }
+
+    #[test]
+    fn disk_rule_mount_matches_like_validation() {
+        let config = Config::parse(
+            r#"
+            [host]
+            mounts = ["/data"]
+            [[alert]]
+            name = "disk"
+            scope = "host"
+            metric = "disk_used_percent"
+            mount = "/data/"
+            op = ">"
+            threshold = 85
+            "#,
+        )
+        .unwrap();
+        let mut e = Engine::new(&config);
+        let mut s = sample();
+        s.host.disks[0].mount = "/data".into();
+        s.host.disks[0].used_percent = Some(90.0);
+        let events = e.evaluate(&s, 0);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EventKind::Firing);
+        assert_eq!(events[0].value, Some(90.0));
     }
 
     #[test]
