@@ -37,7 +37,15 @@ pub async fn run(
         warn!("no [[agent]] configured; nothing can push samples until one is added");
     }
     for agent in &config.agents {
-        if secrets.token_for(&agent.name).is_none() {
+        let token_set = secrets.token_for(&agent.name).is_some();
+        info!(
+            agent = %agent.name,
+            token_env = %agent.token_env,
+            token = if token_set { "set" } else { "unset" },
+            silence_after = ?agent.silence_after_or(config.silence.after),
+            "agent configured"
+        );
+        if !token_set {
             warn!(
                 agent = %agent.name,
                 "{} is not set; this agent cannot authenticate until it is",
@@ -82,6 +90,7 @@ pub async fn run(
     tasks.push(tokio::spawn(silence::run(
         db.clone(),
         config.silence.clone(),
+        config.agents.clone(),
         queue,
     )));
     tasks.push(tokio::spawn(sweep::run(db.clone(), config.storage.clone())));

@@ -231,10 +231,19 @@ impl HostSummary {
 async fn all_hosts(state: &AppState) -> anyhow::Result<(Vec<HostRow>, Vec<HostSummary>)> {
     let rows = state.db.call(|c| store::hosts(c)).await?;
     let now = unix_millis();
-    let after = state.config.silence.after.as_millis() as u64;
+    let default = state.config.silence.after;
     let mut summaries: Vec<HostSummary> = rows
         .iter()
-        .map(|row| HostSummary::known(row, now, after))
+        .map(|row| {
+            let after = state
+                .config
+                .agents
+                .iter()
+                .find(|a| a.name == row.name)
+                .map_or(default, |a| a.silence_after_or(default))
+                .as_millis() as u64;
+            HostSummary::known(row, now, after)
+        })
         .collect();
     for agent in &state.config.agents {
         if !rows.iter().any(|r| r.name == agent.name) {

@@ -134,6 +134,16 @@ pub struct AgentConfig {
     pub name: String,
     /// Environment variable holding the agent's bearer token.
     pub token_env: String,
+    /// Overrides `[silence] after` for this host only.
+    #[serde(default, deserialize_with = "de_opt_duration")]
+    pub silence_after: Option<Duration>,
+}
+
+impl AgentConfig {
+    /// This host's silence threshold, or `default` when it has no override.
+    pub fn silence_after_or(&self, default: Duration) -> Duration {
+        self.silence_after.unwrap_or(default)
+    }
 }
 
 /// Values read from the environment. Never logged, never serialised.
@@ -267,6 +277,12 @@ impl Config {
                     agent.name, agent.token_env
                 ));
             }
+            if agent.silence_after.is_some_and(|d| d.is_zero()) {
+                errors.push(format!(
+                    "agent `{}`: silence_after must be greater than zero",
+                    agent.name
+                ));
+            }
         }
 
         errors
@@ -335,12 +351,21 @@ mod tests {
         [[agent]]
         name = "home"
         token_env = "NINJA_INGEST_TOKEN_HOME"
+        silence_after = "10m"
     "#;
 
     #[test]
     fn parses_full_config() {
         let config = Config::parse(FULL).unwrap();
         assert_eq!(config.agents.len(), 2);
+        let vps = &config.agents[0];
+        let home = &config.agents[1];
+        assert_eq!(home.silence_after, Some(Duration::from_secs(600)));
+        assert_eq!(vps.silence_after, None);
+        assert_eq!(
+            vps.silence_after_or(config.silence.after),
+            Duration::from_secs(120)
+        );
         assert_eq!(config.silence.after, Duration::from_secs(120));
         assert_eq!(config.silence.repeat, Some(Duration::from_secs(6 * 3600)));
         assert_eq!(config.storage.retention, Duration::from_secs(30 * 86_400));
@@ -400,6 +425,11 @@ mod tests {
         );
         assert!(errors(&long).contains("64 bytes"));
         assert!(errors("[[agent]]\nname = \"a \"\ntoken_env = \"A\"").contains("space"));
+        let with =
+            |v: &str| format!("[[agent]]\nname = \"a\"\ntoken_env = \"A\"\nsilence_after = {v}");
+        assert!(errors(&with("\"0s\"")).contains("silence_after"));
+        assert!(errors(&with("\"10 minutes\"")).contains("duration"));
+        assert!(Config::parse(&with("600")).is_err());
     }
 
     #[test]

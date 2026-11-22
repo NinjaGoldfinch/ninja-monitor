@@ -282,13 +282,14 @@ is a full, commented example.
 | `[storage] events_retention` | `180d` | Alert events older than this are deleted. |
 | `[discord] enabled` | `false` | Post SILENT and REPORTING to the webhook in `NINJA_INGEST_DISCORD_WEBHOOK`. If the variable is missing, a warning is logged and the daemon runs without. |
 | `[discord] startup_message` | `true` | Post `STARTED` at every start. |
-| `[silence] after` | `2m` | No samples for this long means the host is silent. Keep it at least the agents' back-off cap (60s) plus two sampling intervals. |
+| `[silence] after` | `2m` | Default for agents without `silence_after`. No samples for this long means the host is silent. Keep it at least the agents' back-off cap (60s) plus two sampling intervals. |
 | `[silence] repeat` | none | Remind on this interval while a host stays silent. |
 | `[heartbeat] enabled` | `false` | GET a URL on a timer, but only after a database query answers, so a wedged server stops pinging. |
 | `[heartbeat] url_env` | `NINJA_INGEST_HEARTBEAT_URL` | Environment variable holding the heartbeat URL. |
 | `[heartbeat] interval` | `60s` | Time between heartbeats. |
 | `[[agent]] name` | required | Must equal `[host] name` in that agent's config. |
 | `[[agent]] token_env` | required | Environment variable holding that agent's bearer token. |
+| `[[agent]] silence_after` | `[silence] after` | Silence threshold for this host only, as a duration like `"10m"`. Used for SILENT, REPORTING and the host's status in `GET /hosts`. |
 
 Environment variables, in `/etc/ninja-ingest/env`:
 
